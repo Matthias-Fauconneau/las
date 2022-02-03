@@ -1,0 +1,32 @@
+package={name='las', version='0.0.0', edition='2021', default-run='main'}
+bin=[{name='main', path='main.rs'}]
+[dependencies]
+fehler='*'
+ordered-float="*"
+vector={git='https://github.com/Matthias-Fauconneau/vector'}
+xy={git='https://github.com/Matthias-Fauconneau/xy'}
+ui={git='https://github.com/Matthias-Fauconneau/ui'}
+memmap={version='*', package='memmap2'}
+owning-ref={package='owning_ref', version = "*"}
+bytemuck="*"
+image={git='https://github.com/Matthias-Fauconneau/image'}
+
+[patch.'https://github.com/Matthias-Fauconneau/ui']
+ui={path='../ui'}
+[patch.'https://github.com/Matthias-Fauconneau/image']
+image={path='../image'}
+[patch.'https://github.com/Matthias-Fauconneau/vector']
+vector={path='../vector'}
+[patch.'https://github.com/Matthias-Fauconneau/xy']
+xy={path='../xy'}
+[patch.'https://github.com/Matthias-Fauconneau/piet-gpu']
+piet-gpu-types={path='../piet-gpu/piet-gpu-types'}
+piet-gpu={path='../piet-gpu/piet-gpu'}
+piet-gpu-hal={path='../piet-gpu/piet-gpu-hal'}
+[patch.crates-io]
+ash-window={git='https://github.com/Matthias-Fauconneau/ash'}
+ash={git='https://github.com/Matthias-Fauconneau/ash'}
+
+[profile.dev]
+opt-level = 1
+overflow-checks = false
