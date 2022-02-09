@@ -1,11 +1,12 @@
-#![feature(type_alias_impl_trait)]
+#![feature(type_alias_impl_trait, portable_simd, stdsimd, let_else)]
+#![allow(non_snake_case)]
 
 /// T should be a basic type (i.e valid when casted from any data)
 pub unsafe fn from_bytes<T>(slice: &[u8]) -> &[T] {
     std::slice::from_raw_parts(slice.as_ptr() as *const T, slice.len() / std::mem::size_of::<T>())
 }
 
-use {ui::Error, fehler::throws};
+use {ui::{Error, Result}, fehler::throws};
 use owning_ref::OwningRef;
 
 vector::vector!(3 xyz T T T, x y z, X Y Z);
@@ -45,7 +46,7 @@ impl Widget for LAS {
     }
 }
 
-#[throws] fn paint(&mut self, target: &mut Image, _size: size) {
+fn paint(&mut self, target: &mut Image, _size: size) -> Result {
     use image::bgra8;
     target.fill(bgra8{b:0,g:0,r:0,a:0xFF});
     let size = vec2::from(target.size);
@@ -59,20 +60,24 @@ impl Widget for LAS {
         let p = xy{x: p.x, y: (size.y-1.) - p.y};
         p
     };
-    #[allow(non_snake_case)] let O = transform(vec3{x:0., y:0., z:0.});
-    let e = [vec3{x:1., y:0., z:0.}, vec3{x:0., y:1., z:0.}, vec3{x:0., y:0., z:1.}].map(|e| transform(e)-O);
-    for ((&x, &y), &z) in zip(zip(&*self.x, &*self.y), &*self.z) { //.step_by(4) {
-        let p = x * e[0] + y * e[1] + z * e[2] + O;
-        fn from(f: xy<f32>) -> xy<u32> { xy{x: f.x as u32, y: f.y as u32} }
-        let p = from(p);
-        if p.x < target.size.x && p.y < target.size.y {
-            target[p] = bgra8{b: 0xFF, g: 0xFF, r: 0xFF, a: 0xFF};
-            /*let v = intensity as f32/u16::MAX as f32;
-            //let v = (p.z-min.z)/(max.z-min.z);
-            use image::{rgb::rgb, sRGB};
-            target[p] = bgra8::from(rgb::from([sRGB(&v); 3]));*/
-        }
-    }
+    let O = transform(vec3{x:0., y:0., z:0.});
+    use std::simd::{Simd, f32x16, u32x16};
+    let [[e0_x,e0_y],[e1_x,e1_y],[e2_x,e2_y]] = [vec3{x:1., y:0., z:0.}, vec3{x:0., y:1., z:0.}, vec3{x:0., y:0., z:1.}].map(|e| { let e = transform(e)-O; [e.x,e.y].map(Simd::splat) });
+    let [O_x,O_y] = [O.x, O.y].map(Simd::splat);
+    let [x,y,z] = [&self.x, &self.y, &self.z].map(|array| unsafe { let ([], array, _) = array.align_to::<f32x16>() else { unreachable!() }; array});
+    let stride = Simd::splat(target.stride);
+    let white : u32x16 = Simd::splat(bytemuck::cast::<_,u32>(bgra8{b: 0xFF, g: 0xFF, r: 0xFF, a: 0xFF}));
+    for ((x, y), z) in zip(zip(x, y), z) { unsafe {
+        //let p_y : u32x16 = (x * e0_y + y * e1_y + z * e2_y + O_y).cast::<u32>();
+        //let p_x : u32x16 = (x * e0_x + y * e1_x + z * e2_x + O_x).cast::<u32>();
+        let p_y : u32x16 = _mm512_cvttps_epu32((x * e0_y + y * e1_y + z * e2_y + O_y).into()).into();
+        let p_x : u32x16 = _mm512_cvttps_epu32((x * e0_x + y * e1_x + z * e2_x + O_x).into()).into();
+        let indices = p_y * stride + p_x;
+        //unsafe{white.scatter_select_unchecked(target, indices.lanes_lt(Simd::splat(target.len())), indices)};
+        use std::arch::x86_64::*;
+        _mm512_mask_i32scatter_epi32(target.as_mut_ptr() as *mut u8, _mm512_cmplt_epu32_mask(indices.into(), Simd::splat(target.len()).into()), indices.into(), white.into(), 4);
+    }}
+    Ok(())
 }
 }
 
