@@ -3,7 +3,6 @@ bin=[{name='main', path='main.rs'}]
 [dependencies]
 fehler='*'
 vector={git='https://github.com/Matthias-Fauconneau/vector'}
-xy={git='https://github.com/Matthias-Fauconneau/xy'}
 ui={git='https://github.com/Matthias-Fauconneau/ui'}
 memmap={version='*', package='memmap2'}
 owning-ref={package='owning_ref', version = "*"}
@@ -18,6 +17,8 @@ ash-window={git='https://github.com/Matthias-Fauconneau/ash'}
 ash={git='https://github.com/Matthias-Fauconneau/ash'}
 tiff={path='../image-tiff'}
 jpeg-decoder={path="../jpeg-decoder"}
+[patch.'https://github.com/Matthias-Fauconneau/vector']
+vector={path='../vector'}
 [patch.'https://github.com/Matthias-Fauconneau/image']
 image={path='../image'}
 

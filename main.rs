@@ -7,30 +7,35 @@ pub unsafe fn from_bytes<T>(slice: &[u8]) -> &[T] {
 }
 
 use {ui::{Error, Result}, fehler::throws};
+type Bounds = vector::MinMax<vec3>;
 use owning_ref::OwningRef;
-
-vector::vector!(3 xyz T T T, x y z, X Y Z);
-#[allow(non_camel_case_types)] pub type vec3 = xyz<f32>;
 
 type Array<T=f32> = OwningRef<Box<memmap::Mmap>, [T]>;
 
-struct LAS {
+mod rgba { vector::vector!(4 rgba T T T T, r g b a, Red Green Blue Alpha); }
+#[allow(non_camel_case_types)] pub type rgba8 = rgba::rgba<u8>;
+use image::Image;
+
+struct View {
     x: Array,
     y: Array,
     z: Array,
+
+    image_bounds: Bounds,
+    image: Image<Array<rgba8>>,
 
     start_position: vec2,
     position: vec2,
     vertical_scroll: f32,
 }
 
-use {::xy::{xy, size, vec2}, ui::{Widget, RenderContext as Image, widget::{EventContext, Event}}, vector::num::{Zero, IsZero}};
+use {vector::{xy, size, vec2, xyz, vec3}, ui::{Widget, RenderContext as Target, widget::{EventContext, Event}}, vector::num::{Zero, IsZero}};
 
 fn xy(xyz{x,y,..}: vec3) -> vec2 { xy{x, y} }
 use std::f32::consts::PI;
 fn rotate(xy{x,y,..}: vec2, angle: f32) -> vec2 { xy{x: f32::cos(angle)*x+f32::sin(angle)*y, y: f32::cos(angle)*y-f32::sin(angle)*x} }
 
-impl Widget for LAS {
+impl Widget for View {
 #[throws] fn event(&mut self, _size: size, _event_context: &EventContext, event: &Event) -> bool {
     match event {
         &Event::Motion{position, ..} => {
@@ -46,7 +51,7 @@ impl Widget for LAS {
     }
 }
 
-fn paint(&mut self, target: &mut Image, _size: size) -> Result {
+fn paint(&mut self, target: &mut Target, _size: size) -> Result {
     use image::bgra8;
     target.fill(bgra8{b:0,g:0,r:0,a:0xFF});
     let size = vec2::from(target.size);
@@ -82,60 +87,81 @@ fn paint(&mut self, target: &mut Image, _size: size) -> Result {
 }
 }
 
-impl LAS {
-    fn new(name: &str) -> Self {
+#[throws] fn size(name: &str) -> size {
+    let tiff = unsafe{memmap::Mmap::map(&std::fs::File::open("2408.tif")?)?};
+    let mut tiff = tiff::decoder::Decoder::new(std::io::Cursor::new(&*tiff))?;
+    let (size_x, size_y) = tiff.dimensions()?;
+    size{x: size_x, y: size_y}
+}
+
+#[throws] fn bounds(name: &str) -> Bounds {
+    let size = size(name)?;
+    let tiff = unsafe{memmap::Mmap::map(&std::fs::File::open("2408.tif")?)?};
+    let mut tiff = tiff::decoder::Decoder::new(std::io::Cursor::new(&*tiff))?;
+    let [0., 0., 0., E, N, 0.] = tiff.get_tag_f64_vec(tiff::tags::Tag::ModelTiepointTag)?[..] else { panic!() };
+    let [scale_E, scale_N, 0.] = tiff.get_tag_f64_vec(tiff::tags::Tag::ModelPixelScaleTag)?[..] else { panic!() };
+    let min = vec3{x: E as f32, y: (N-scale_N*size.y as f64) as f32, z: 0.};
+    let max = vec3{x: (E+scale_E*size.x as f64) as f32, y: N as f32, z: f32::MAX};
+    vector::MinMax{min, max}
+}
+
+impl View {
+    #[throws] fn new(raster: &str, points: &str) -> Self {
         #[throws] fn map<T>(field: &str, name: &str) -> Array<T> {
             OwningRef::new(Box::new(unsafe{memmap::Mmap::map(&std::fs::File::open(format!("{name}.{field}"))?)}?)).map(|data| unsafe{from_bytes(&*data)})
         }
-        let map = |field| map(field, name).unwrap();
-        Self{x: map("x"), y: map("y"), z: map("z"), start_position: vec2::ZERO, position: vec2::ZERO, vertical_scroll: 1.}
+        let size = size(raster)?;
+        let data = map("rgba", raster)?;
+        let image = Image::new(size, data);
+        let map = |field| map(field, points).unwrap();
+        Self{
+            x: map("x"), y: map("y"), z: map("z"),
+            image_bounds: bounds(raster)?,
+            image,
+            start_position: vec2::ZERO, position: vec2::ZERO, vertical_scroll: 1.
+        }
     }
 }
 #[throws] fn main() {
-    /*let points = Box::new(unsafe{memmap::Mmap::map(&std::fs::File::open("2684_1248.points")?)}?);
-    #[derive(Clone, Copy)] struct Point { position: vec3, #[allow(dead_code)] intensity: u16 }
-    let ref points = OwningRef::new(points).map(|points| unsafe{from_bytes(&*points)});
-    //println!("{:?}", vector::minmax(points.iter().map(|Point{intensity,..}| *intensity)).unwrap());
-    let vector::MinMax{min,max} = vector::minmax(points.iter().map(|Point{position,..}| *position)).unwrap();
-    let center = (1./2.)*(min+max);
-    let extent = max-min;
-    let extent = extent.x.max(extent.y.max(extent.z));
-
-    pub fn to_byte_slice<T>(slice: &[T]) -> &[u8] { unsafe{std::slice::from_raw_parts(slice.as_ptr() as *const u8, slice.len() * std::mem::size_of::<T>())} }
-    #[throws] fn write<T>(points: &[Point], field: &str, f: impl Fn(&Point)->T) { std::fs::write(format!("2684_1248.{field}"), to_byte_slice(&points.iter().map(f).collect::<Box<_>>()))? }
-    write(points, "x", |&Point{position,..}| (position.x-center.x)/extent)?;
-    write(points, "y", |&Point{position,..}| (position.y-center.y)/extent)?;
-    write(points, "z", |&Point{position,..}| (position.z-center.z)/extent)?;*/
-
-    let tiff = unsafe{memmap::Mmap::map(&std::fs::File::open("2408.tif")?)?};
+    /*let tiff = unsafe{memmap::Mmap::map(&std::fs::File::open("2408.tif")?)?};
     let mut tiff = tiff::decoder::Decoder::new(std::io::Cursor::new(&*tiff))?.with_limits(tiff::decoder::Limits::unlimited());
-
-    #[allow(non_camel_case_types)] pub type rgba8 = rgba<u8>;
-
-    /*let tiff::decoder::DecodingResult::U8(rgba) = tiff.read_image()? else { panic!() };
+    let tiff::decoder::DecodingResult::U8(rgba) = tiff.read_image()? else { panic!() };
     println!("{}", rgba.len());
     std::fs::write("2408.rgba", &rgba)?;
-    println!("2408.rgba");
-    fn cast_vec<T, U>(v: Vec<T>) -> Vec<U> { let (ptr, len, cap) = v.into_raw_parts(); unsafe { Vec::from_raw_parts(ptr as *mut U, len, cap) } }
-    let rgba = cast_vec::<_, rgba8>(rgba).into_boxed_slice();*/
-    let rgba = unsafe{memmap::Mmap::map(&std::fs::File::open("2408.rgba")?)?};
+    println!("2408.rgba");*/
 
-    let [0., 0., 0., E, N, 0.] = tiff.get_tag_f64_vec(tiff::tags::Tag::ModelTiepointTag)?[..] else { panic!() };
-    let min = vec2{x: E as f32, y: N as f32};
-    let [scale_E, scale_N, 0.] = tiff.get_tag_f64_vec(tiff::tags::Tag::ModelPixelScaleTag)?[..] else { panic!() };
-    let (size_x, size_y) = tiff.dimensions()?;
-    vector::vector!(4 rgba T T T T, r g b a, Red Green Blue Alpha);
-    let image = image::Image::<&[rgba8]>::cast_slice(&*rgba, ::xy::size{x: size_x, y: size_y});
-    let max = vec2{x: (E+scale_E*image.size.x as f64) as f32, y: (N+scale_N*image.size.y as f64) as f32};
-    println!("{min:?} {max:?}");
+    /*let mut reader = las::Reader::from_path("2684_1248.las")?;
+    let points_bounds = {
+        let las::Bounds{min, max} = las::Read::header(&reader).bounds();
+        vector::MinMax{min: vec3{x: min.x as f32, y: min.y as f32, z: min.z as f32}, max: vec3{x: max.x as f32, y: max.y as f32, z: max.z as f32}}
+    };
+    let raster_bounds = bounds("2408.tif");
+    let min = vector::component_wise_max(points_bounds.min, raster_bounds.min);
+    let max = vector::component_wise_min(points_bounds.max, raster_bounds.max);
+    //println!("{raster_bounds:?}\n{points_bounds:?}\n{min:?} {max:?}");
 
-    let reader = las::Reader::from_path("2684_1248.las")?;
-    println!("{:?}", las::Read::header(&reader).bounds());
-    /*for point in reader.points() {
+    let center = (1./2.)*(min+max);
+    let extent = max-min;
+    let extent = extent.x.min(extent.y);
+
+    let mut X = Vec::with_capacity(las::Read::header(&reader).number_of_points() as usize);
+    let mut Y = Vec::with_capacity(las::Read::header(&reader).number_of_points() as usize);
+    let mut Z = Vec::with_capacity(las::Read::header(&reader).number_of_points() as usize);
+    for point in las::Read::points(&mut reader) {
         let las::Point{x: E,y: N, z, ..} = point.unwrap();
-    }*/
+        let x = (E as f32-center.x)/extent;
+        let y = (N as f32-center.y)/extent;
+        let z = (z as f32-center.z)/extent;
+        if x >= -1./2. && x <= 1./2. && y >= -1./2. && y <= 1./2. {
+            X.push(x);
+            Y.push(y);
+            Z.push(z);
+        }
+    }
+    #[throws] fn write<T:bytemuck::Pod>(field: &str, points: &[T]) { std::fs::write(format!("2684_1248.{field}"), bytemuck::cast_slice(points))? }
+    write("x", &X)?;
+    write("y", &Y)?;
+    write("z", &Z)?;*/
 
-
-
-    //ui::run(Box::new(LAS::new("2684_1248")))?
+    ui::run(Box::new(View::new("2408", "2684_1248")?))?
 }
