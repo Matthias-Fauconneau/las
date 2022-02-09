@@ -9,11 +9,12 @@ memmap={version='*', package='memmap2'}
 owning-ref={package='owning_ref', version = "*"}
 bytemuck="*"
 image={git='https://github.com/Matthias-Fauconneau/image'}
+rayon="*"
 
 [patch.crates-io]
 ash-window={git='https://github.com/Matthias-Fauconneau/ash'}
 ash={git='https://github.com/Matthias-Fauconneau/ash'}
 
 [profile.dev]
-opt-level = 1
+opt-level = 3
 overflow-checks = false

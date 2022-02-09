@@ -67,7 +67,8 @@ fn paint(&mut self, target: &mut Image, _size: size) -> Result {
     let [x,y,z] = [&self.x, &self.y, &self.z].map(|array| unsafe { let ([], array, _) = array.align_to::<f32x16>() else { unreachable!() }; array});
     let stride = Simd::splat(target.stride);
     let white : u32x16 = Simd::splat(bytemuck::cast::<_,u32>(bgra8{b: 0xFF, g: 0xFF, r: 0xFF, a: 0xFF}));
-    for ((x, y), z) in zip(zip(x, y), z) { unsafe {
+    use rayon::prelude::*;
+    (x, y, z).into_par_iter().for_each(|(x, y, z)| { unsafe {
         //let p_y : u32x16 = (x * e0_y + y * e1_y + z * e2_y + O_y).cast::<u32>();
         //let p_x : u32x16 = (x * e0_x + y * e1_x + z * e2_x + O_x).cast::<u32>();
         let p_y : u32x16 = _mm512_cvttps_epu32((x * e0_y + y * e1_y + z * e2_y + O_y).into()).into();
@@ -75,8 +76,8 @@ fn paint(&mut self, target: &mut Image, _size: size) -> Result {
         let indices = p_y * stride + p_x;
         //unsafe{white.scatter_select_unchecked(target, indices.lanes_lt(Simd::splat(target.len())), indices)};
         use std::arch::x86_64::*;
-        _mm512_mask_i32scatter_epi32(target.as_mut_ptr() as *mut u8, _mm512_cmplt_epu32_mask(indices.into(), Simd::splat(target.len()).into()), indices.into(), white.into(), 4);
-    }}
+        _mm512_mask_i32scatter_epi32(target.as_ptr() as *mut u8, _mm512_cmplt_epu32_mask(indices.into(), Simd::splat(target.len()).into()), indices.into(), white.into(), 4);
+    }});
     Ok(())
 }
 }
