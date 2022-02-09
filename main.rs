@@ -1,4 +1,4 @@
-#![feature(type_alias_impl_trait, portable_simd, stdsimd, let_else)]
+#![feature(type_alias_impl_trait, portable_simd, stdsimd, let_else, vec_into_raw_parts)]
 #![allow(non_snake_case)]
 
 /// T should be a basic type (i.e valid when casted from any data)
@@ -24,7 +24,7 @@ struct LAS {
     vertical_scroll: f32,
 }
 
-use {std::iter::zip, ::xy::{xy, size, vec2}, ui::{Widget, RenderContext as Image, widget::{EventContext, Event}}, vector::num::{Zero, IsZero}};
+use {::xy::{xy, size, vec2}, ui::{Widget, RenderContext as Image, widget::{EventContext, Event}}, vector::num::{Zero, IsZero}};
 
 fn xy(xyz{x,y,..}: vec3) -> vec2 { xy{x, y} }
 use std::f32::consts::PI;
@@ -107,5 +107,35 @@ impl LAS {
     write(points, "y", |&Point{position,..}| (position.y-center.y)/extent)?;
     write(points, "z", |&Point{position,..}| (position.z-center.z)/extent)?;*/
 
-    ui::run(Box::new(LAS::new("2684_1248")))?
+    let tiff = unsafe{memmap::Mmap::map(&std::fs::File::open("2408.tif")?)?};
+    let mut tiff = tiff::decoder::Decoder::new(std::io::Cursor::new(&*tiff))?.with_limits(tiff::decoder::Limits::unlimited());
+
+    #[allow(non_camel_case_types)] pub type rgba8 = rgba<u8>;
+
+    /*let tiff::decoder::DecodingResult::U8(rgba) = tiff.read_image()? else { panic!() };
+    println!("{}", rgba.len());
+    std::fs::write("2408.rgba", &rgba)?;
+    println!("2408.rgba");
+    fn cast_vec<T, U>(v: Vec<T>) -> Vec<U> { let (ptr, len, cap) = v.into_raw_parts(); unsafe { Vec::from_raw_parts(ptr as *mut U, len, cap) } }
+    let rgba = cast_vec::<_, rgba8>(rgba).into_boxed_slice();*/
+    let rgba = unsafe{memmap::Mmap::map(&std::fs::File::open("2408.rgba")?)?};
+
+    let [0., 0., 0., E, N, 0.] = tiff.get_tag_f64_vec(tiff::tags::Tag::ModelTiepointTag)?[..] else { panic!() };
+    let min = vec2{x: E as f32, y: N as f32};
+    let [scale_E, scale_N, 0.] = tiff.get_tag_f64_vec(tiff::tags::Tag::ModelPixelScaleTag)?[..] else { panic!() };
+    let (size_x, size_y) = tiff.dimensions()?;
+    vector::vector!(4 rgba T T T T, r g b a, Red Green Blue Alpha);
+    let image = image::Image::<&[rgba8]>::cast_slice(&*rgba, ::xy::size{x: size_x, y: size_y});
+    let max = vec2{x: (E+scale_E*image.size.x as f64) as f32, y: (N+scale_N*image.size.y as f64) as f32};
+    println!("{min:?} {max:?}");
+
+    let reader = las::Reader::from_path("2684_1248.las")?;
+    println!("{:?}", las::Read::header(&reader).bounds());
+    /*for point in reader.points() {
+        let las::Point{x: E,y: N, z, ..} = point.unwrap();
+    }*/
+
+
+
+    //ui::run(Box::new(LAS::new("2684_1248")))?
 }
