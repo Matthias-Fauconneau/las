@@ -76,9 +76,9 @@ fn paint(&mut self, target: &mut Target, _size: size) -> Result {
     let O = transform(vec3{x:0., y:0., z:0.});
     use std::simd::{Simd, f32x16, u32x16};
     let [[e0_x,e0_y],[e1_x,e1_y],[e2_x,e2_y]] = [vec3{x:1., y:0., z:0.}, vec3{x:0., y:1., z:0.}, vec3{x:0., y:0., z:1.}].map(|e| { let e = transform(e)-O; [e.x,e.y].map(Simd::splat) });
-    let [O_x,O_y] = [O.x, O.y].map(Simd::splat);
+    let O = O.map(|&x| Simd::splat(x));
     let [x,y,z] = [&self.x, &self.y, &self.z].map(|array| unsafe { let ([], array, _) = array.align_to::<f32x16>() else { unreachable!() }; array});
-    let stride = Simd::splat(target.stride);
+    let size = target.size.map(|&x| Simd::splat(x));
     use rayon::prelude::*;
     (x, y, z).into_par_iter().for_each(|(x, y, z)| { unsafe {
     	let [b,g,r] = &self.image;
@@ -89,12 +89,12 @@ fn paint(&mut self, target: &mut Target, _size: size) -> Result {
         let g : u32x16 = _mm512_i32gather_epi32(indices.into(), (g.as_ptr() as *const u8).offset(-1), 1).into();
         let r : u32x16 = _mm512_i32gather_epi32(indices.into(), (r.as_ptr() as *const u8).offset(-2), 1).into();
         let bgra = Simd::splat(0xFF_00_00_00) | r & Simd::splat(0x00_FF_00_00) | g & Simd::splat(0x00_00_FF_00) | b & Simd::splat(0x00_00_00_FF);
-        let p_y : u32x16 = _mm512_cvttps_epu32((x * e0_y + y * e1_y + z * e2_y + O_y).into()).into();
-        let p_x : u32x16 = _mm512_cvttps_epu32((x * e0_x + y * e1_x + z * e2_x + O_x).into()).into();
-        let indices = p_y * stride + p_x;
+        let p_y : u32x16 = _mm512_cvttps_epu32((x * e0_y + y * e1_y + z * e2_y + O.y).into()).into();
+        let p_x : u32x16 = _mm512_cvttps_epu32((x * e0_x + y * e1_x + z * e2_x + O.x).into()).into();
+        let indices = p_y * size.x + p_x;
         //unsafe{bgra.scatter_select_unchecked(target, indices.lanes_lt(Simd::splat(target.len())), indices)};
         use std::arch::x86_64::*;
-        _mm512_mask_i32scatter_epi32(target.as_ptr() as *mut u8, _mm512_cmplt_epu32_mask(indices.into(), Simd::splat(target.len()).into()), indices.into(), bgra.into(), 4);
+        _mm512_mask_i32scatter_epi32(target.as_ptr() as *mut u8, _mm512_cmplt_epu32_mask(p_x.into(), size.x.into()) & _mm512_cmplt_epu32_mask(p_y.into(), size.y.into()), indices.into(), bgra.into(), 4);
     }});
     Ok(())
 }
