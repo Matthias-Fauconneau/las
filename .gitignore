@@ -2,7 +2,4 @@ Cargo.lock
 .vscode
 *.las
 *.tif
-*.rgba
-*.x
-*.y
-*.z
+cache
