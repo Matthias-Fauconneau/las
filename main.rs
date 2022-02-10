@@ -64,8 +64,8 @@ fn paint(&mut self, target: &mut Target, size: size) -> Result {
         }
     }*/
     target.fill(bgra8{b:0,g:0,r:0,a:0xFF});
+    let size = vec2::from(size);
     let transform = |p:vec3| {
-        let size = vec2::from(size);
         let yaw = (self.position.x-self.start_position.x)/size.x*2.*PI;
         let pitch = f32::clamp(0., (1.-self.position.y/size.y)*PI/2., PI/2.);
         let scale = size.x.min(size.y)*self.vertical_scroll;
@@ -78,8 +78,6 @@ fn paint(&mut self, target: &mut Target, size: size) -> Result {
     let O = transform(vec3{x:0., y:0., z:0.});
     let e = [vec3{x:1., y:0., z:0.}, vec3{x:0., y:1., z:0.}, vec3{x:0., y:0., z:1.}].map(|e| transform(e)-O);
     /*use std::simd::{Simd, f32x16, u32x16};
-    let O = O.map(|&x| Simd::splat(x));
-    let e = e.map(|e| e.map(Simd::splat));
     let [x,y,z] = [&self.x, &self.y, &self.z].map(|array| unsafe { let ([], array, _) = array.align_to::<f32x16>() else { unreachable!() }; array});
     let size = size.map(|&x| Simd::splat(x));
     use rayon::prelude::*;
@@ -92,6 +90,8 @@ fn paint(&mut self, target: &mut Target, size: size) -> Result {
         let g : u32x16 = _mm512_i32gather_epi32(indices.into(), (g.as_ptr() as *const u8).offset(-1), 1).into();
         let r : u32x16 = _mm512_i32gather_epi32(indices.into(), (r.as_ptr() as *const u8).offset(-2), 1).into();
         let bgra = Simd::splat(0xFF_00_00_00) | r & Simd::splat(0x00_FF_00_00) | g & Simd::splat(0x00_00_FF_00) | b & Simd::splat(0x00_00_00_FF);
+        let e = e.map(|e| e.map(Simd::splat));
+        let O = O.map(|&x| Simd::splat(x));
         let p = x * e[0] + y * e[1] + z * e[2] + O;
         let p : xy<u32x16> = p.map(|p| _mm512_cvttps_epu32(p.into()).into());
         //unsafe{bgra.scatter_select_unchecked(target, indices.lanes_lt(Simd::splat(target.len())), p.y * size.x + p.x)};
@@ -99,10 +99,25 @@ fn paint(&mut self, target: &mut Target, size: size) -> Result {
         _mm512_mask_i32scatter_epi32(target.as_ptr() as *mut u8, _mm512_cmplt_epu32_mask(p.x.into(), size.x.into()) & _mm512_cmplt_epu32_mask(p.y.into(), size.y.into()), (p.y * size.x + p.x).into(), bgra.into(), 4);
     }});*/
 
-    for (vertices, _triangles) in &*self.meshes {
-        for &vec3{x,y,z} in vertices.iter() {
-            let p = (x * e[0] + y * e[1] + z * e[2] + O).map(|&c| c as u32);
-            if p.x < size.x && p.y < size.y { target[p] = bgra8{b:0xFF,g:0xFF,r:0xFF,a:0xFF}; }
+    for (vertices, triangles) in &*self.meshes {
+        for triangle in triangles.iter() {
+            let vertices = triangle.map(|i| { let xyz{x,y,z} = vertices[i as usize]; x * e[0] + y * e[1] + z * e[2] + O });
+            let vector::MinMax{min,max} = vector::minmax(vertices.into_iter()).unwrap();
+            let min = xy{x: f32::max(0., min.x), y: f32::max(0., min.y)};
+            let max = xy{x: f32::min(max.x+1., size.x), y: f32::min(max.y+1., size.y)};
+            for y in min.y as u32 .. max.y as u32 {
+                for x in min.x as u32 .. max.x as u32 {
+                    let p = xy{x,y};
+                    if {
+                        let p = p.map(|&c| c as f32);
+                        let [v0,v1,v2] = vertices;
+                        use vector::cross;
+                        cross(v1-v0, p-v0) > 0. && cross(v2-v1, p-v1) > 0. && cross(v0-v2, p-v2) > 0.
+                    } {
+                        target[p] = bgra8{b:0xFF,g:0xFF,r:0xFF,a:0xFF};
+                    }
+                }
+            }
         }
     }
 
