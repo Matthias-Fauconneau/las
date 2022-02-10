@@ -13,6 +13,8 @@ image={git='https://github.com/Matthias-Fauconneau/image'}
 rayon="*"
 tiff='*'
 las= "*"
+dxf = {version='*', features=['serialize']}
+bincode = "*"
 
 [patch.crates-io]
 ash-window={git='https://github.com/Matthias-Fauconneau/ash'}
