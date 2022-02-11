@@ -7,7 +7,7 @@ pub unsafe fn from_bytes<T>(slice: &[u8]) -> &[T] {
 }
 
 use {ui::{Error, Result}, fehler::throws};
-type Bounds = vector::MinMax<vec3>;
+
 use owning_ref::OwningRef;
 
 type Array<T=f32> = OwningRef<Box<memmap::Mmap>, [T]>;
@@ -27,22 +27,23 @@ struct View {
     image: [Image<Array<u8>>; 3],
     meshes: Box<[Mesh]>,
 
-    start_position: vec2,
+    start_position: f32,
     position: vec2,
     vertical_scroll: f32,
 }
 
 use {vector::{xy, size, vec2, xyz, vec3}, ui::{Widget, RenderContext as Target, widget::{EventContext, Event}}, vector::num::{Zero, IsZero}};
 
-fn xy(xyz{x,y,..}: vec3) -> vec2 { xy{x, y} }
 use std::f32::consts::PI;
 fn rotate(xy{x,y,..}: vec2, angle: f32) -> vec2 { xy{x: f32::cos(angle)*x+f32::sin(angle)*y, y: f32::cos(angle)*y-f32::sin(angle)*x} }
+
+use vector::MinMax;
 
 impl Widget for View {
 #[throws] fn event(&mut self, _size: size, _event_context: &EventContext, event: &Event) -> bool {
     match event {
         &Event::Motion{position, ..} => {
-            if self.start_position.is_zero() { self.start_position = position; }
+            if self.start_position.is_zero() { self.start_position = position.x; }
             self.position = position;
             true
         },
@@ -66,11 +67,11 @@ fn paint(&mut self, target: &mut Target, size: size) -> Result {
     target.fill(bgra8{b:0,g:0,r:0,a:0xFF});
     let size = vec2::from(size);
     let transform = |p:vec3| {
-        let yaw = (self.position.x-self.start_position.x)/size.x*2.*PI;
+        let yaw = (self.position.x-self.start_position)/size.x*2.*PI;
         let pitch = f32::clamp(0., (1.-self.position.y/size.y)*PI/2., PI/2.);
         let scale = size.x.min(size.y)*self.vertical_scroll;
         let z = p.z;
-        let p = scale*rotate(xy(p), yaw);
+        let p = scale*rotate(p.xy(), yaw);
         let p = size/2.+xy{x: p.x, y: f32::cos(pitch)*p.y+f32::sin(pitch)*scale*z};
         let p = xy{x: p.x, y: (size.y-1.) - p.y};
         p
@@ -101,20 +102,29 @@ fn paint(&mut self, target: &mut Target, size: size) -> Result {
 
     for (vertices, triangles) in &*self.meshes {
         for triangle in triangles.iter() {
-            let vertices = triangle.map(|i| { let xyz{x,y,z} = vertices[i as usize]; x * e[0] + y * e[1] + z * e[2] + O });
-            let vector::MinMax{min,max} = vector::minmax(vertices.into_iter()).unwrap();
+            let vertices = triangle.map(|i| vertices[i as usize]);
+            let view = vertices.map(|xyz{x,y,z}| x * e[0] + y * e[1] + z * e[2] + O );
+            let MinMax{min,max} : MinMax<vec2> = vector::minmax(view.into_iter()).unwrap();
             let min = xy{x: f32::max(0., min.x), y: f32::max(0., min.y)};
             let max = xy{x: f32::min(max.x+1., size.x), y: f32::min(max.y+1., size.y)};
             for y in min.y as u32 .. max.y as u32 {
                 for x in min.x as u32 .. max.x as u32 {
-                    let p = xy{x,y};
-                    if {
-                        let p = p.map(|&c| c as f32);
-                        let [v0,v1,v2] = vertices;
-                        use vector::cross;
-                        cross(v1-v0, p-v0) > 0. && cross(v2-v1, p-v1) > 0. && cross(v0-v2, p-v2) > 0.
-                    } {
-                        target[p] = bgra8{b:0xFF,g:0xFF,r:0xFF,a:0xFF};
+                    let xy = xy{x,y};
+                    let p = xy.map(|&c| c as f32);
+                    use vector::cross;
+                    let [v0,v1,v2] = view;
+                    let (w2,w0,w1) = (cross(v1-v0, p-v0), cross(v2-v1, p-v1), cross(v0-v2, p-v2));
+                    if w2 > 0. && w0 > 0. && w1 > 0. {
+                        let [b,g,r] = &self.image;
+                        let w = cross(v1-v0, v2-v0);
+                        let vec2{x,y} = (w0*vertices[0].xy() + w1*vertices[1].xy() + w2*vertices[2].xy())/w;
+                        let u = ((x+1./2.)*(b.size.x as f32)) as u32;
+                        let v = ((y+1./2.)*(b.size.y as f32)) as u32;
+                        let index = v * b.stride + u;
+                        let b = b[index as usize];
+                        let g = g[index as usize];
+                        let r = r[index as usize];
+                        target[xy] = bgra8{b,g,r,a:0xFF};
                     }
                 }
             }
@@ -132,6 +142,8 @@ fn paint(&mut self, target: &mut Target, size: size) -> Result {
     size{x: size_x, y: size_y}
 }
 
+type Bounds = MinMax<vec3>;
+
 #[throws] fn image_bounds(name: &str) -> Bounds {
     let size = size(name)?;
     let tiff = unsafe{memmap::Mmap::map(&std::fs::File::open(format!("{name}.tif"))?)?};
@@ -140,19 +152,19 @@ fn paint(&mut self, target: &mut Target, size: size) -> Result {
     let [scale_E, scale_N, _] = tiff.get_tag_f64_vec(tiff::tags::Tag::ModelPixelScaleTag)?[..] else { panic!() };
     let min = vec3{x: E as f32, y: (N-scale_N*size.y as f64) as f32, z: 0.};
     let max = vec3{x: (E+scale_E*size.x as f64) as f32, y: N as f32, z: f32::MAX};
-    vector::MinMax{min, max}
+    MinMax{min, max}
 }
 
 #[throws] fn points_bounds(name: &str) -> Bounds {
     let reader = las::Reader::from_path(format!("{name}.las"))?;
     let las::Bounds{min, max} = las::Read::header(&reader).bounds();
-    vector::MinMax{min: vec3{x: min.x as f32, y: min.y as f32, z: min.z as f32}, max: vec3{x: max.x as f32, y: max.y as f32, z: max.z as f32}}
+    MinMax{min: vec3{x: min.x as f32, y: min.y as f32, z: min.z as f32}, max: vec3{x: max.x as f32, y: max.y as f32, z: max.z as f32}}
 }
 
 impl View {
 fn new(image: &str, points: &str) -> Result<Self> {
     let image_bounds = image_bounds(image)?;
-    let vector::MinMax{min, max} = image_bounds.clip(points_bounds(points)?);
+    let MinMax{min, max} = image_bounds.clip(points_bounds(points)?);
     //println!("{min:?} {max:?}");
 
     let center = (1./2.)*(min+max);
@@ -167,7 +179,7 @@ fn new(image: &str, points: &str) -> Result<Self> {
         let x = (E as f32-center.x)/extent;
         let y = (N as f32-center.y)/extent;
         let z = (z as f32-center.z)/extent;
-        if x >= -1./2. && x <= 1./2. && y >= -1./2. && y <= 1./2. {
+        if x > -1./2. && x < 1./2. && y > -1./2. && y < 1./2. {
             X.push(x);
             Y.push(y);
             Z.push(z);
@@ -234,7 +246,9 @@ fn new(image: &str, points: &str) -> Result<Self> {
             [v.polyface_mesh_vertex_index1, v.polyface_mesh_vertex_index2, v.polyface_mesh_vertex_index3, v.polyface_mesh_vertex_index4] == [0,0,0,0]
         ) {
             let dxf::Point{x,y,z} = vertex.location;
-            vertices.push((vec3{x: x as f32,y: y as f32, z: z as f32}-center)/extent)
+            let v = (vec3{x: x as f32,y: y as f32, z: z as f32}-center)/extent;
+            if !(v.x > -1./2. && v.x < 1./2. && v.y > -1./2. && v.y < 1./2.) { return None; }
+            vertices.push(v);
         }
         let triangles = vertices_and_indices.map(|(v,_)| {
             let face = [v.polyface_mesh_vertex_index1, v.polyface_mesh_vertex_index2, v.polyface_mesh_vertex_index3, v.polyface_mesh_vertex_index4];
@@ -253,7 +267,7 @@ fn new(image: &str, points: &str) -> Result<Self> {
         x: map("x"), y: map("y"), z: map("z"),
         image: [b,g,r],
         meshes,
-        start_position: vec2::ZERO, position: vec2::ZERO, vertical_scroll: 1.
+        start_position: 0., position: xy{x:0.,y:f32::MAX}, vertical_scroll: 1.
     })
 }
 }
