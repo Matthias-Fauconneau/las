@@ -1,27 +1,23 @@
 #![feature(type_alias_impl_trait, portable_simd, stdsimd, let_else, new_uninit)]
 #![allow(non_snake_case)]
 
-/// T should be a basic type (i.e valid when casted from any data)
-pub unsafe fn from_bytes<T>(slice: &[u8]) -> &[T] {
-    std::slice::from_raw_parts(slice.as_ptr() as *const T, slice.len() / std::mem::size_of::<T>())
-}
-
 use {ui::{Error, Result}, fehler::throws};
 
 use owning_ref::OwningRef;
 
 type Array<T=f32> = OwningRef<Box<memmap::Mmap>, [T]>;
 
-#[throws] fn map<T>(field: &str, name: &str) -> Array<T> {
-    OwningRef::new(Box::new(unsafe{memmap::Mmap::map(&std::fs::File::open(format!("../.cache/las/{name}.{field}"))?)}?)).map(|data| unsafe{from_bytes(&*data)})
+#[throws] fn map<T:bytemuck::Pod>(field: &str, name: &str) -> Array<T> {
+    OwningRef::new(Box::new(unsafe{memmap::Mmap::map(&std::fs::File::open(format!("../.cache/las/{name}.{field}"))?)}?)).map(|data| bytemuck::cast_slice(&*data))
 }
 
 use image::{Image, bgra8};
 
 type Mesh = (Box<[vec3]>, Box<[[u16; 3]]>);
 struct View {
+    oblique: [[Image<Array<u8>>; 3]; 4],
 	ground: Image<Array<f32>>,
-    image: [Image<Array<u8>>; 3],
+    //ortho: [Image<Array<u8>>; 3],
     buildings: Box<[Mesh]>,
     x: Array,
     y: Array,
@@ -56,19 +52,28 @@ impl Widget for View {
 }
 
 fn paint(&mut self, target: &mut Target, size: size) -> Result {
-    /*for y in 0..target.size.y {
-        for x in 0..target.size.x {
-            let [b,g,r] = &self.image;
-            let i = (y*b.stride+x) as usize;
-            let [b,g,r] = [b.data[i],g.data[i],r.data[i]];
-            target.data[(y*target.stride+x) as usize] = image::bgra{b, g, r, a: 0xFF};
+    for (index, image) in self.oblique.iter().enumerate() {
+        let [b,g,r] = &image;
+        let image = &b;
+        let size = size/2;
+        let size = if size.x*image.size.y < size.y*image.size.x
+        { xy{x: size.x, y: image.size.y*size.x/image.size.x} } else
+        { xy{x: image.size.x*size.y/image.size.y, y: size.y} };
+        let offset = size/2;
+        for y in 0..size.y {
+            for x in 0..size.x {
+                let i = (y*size.y/image.size.y*image.stride+x*size.x/image.size.x) as usize;
+                let [b,g,r] = [b.data[i],g.data[i],r.data[i]];
+                target.data[((index as u32/2*target.size.y/2+offset.y+y)*target.stride+index as u32%2*target.size.x/2+offset.x+x) as usize] = image::bgra{b, g, r, a: 0xFF};
+            }
         }
-    }*/
-    target.fill(bgra8{b:0,g:0,r:0,a:0xFF});
+    }
+
+    //target.fill(bgra8{b:0,g:0,r:0,a:0xFF});
     let transform = |p:vec3| {
         let size = vec2::from(size);
-        let yaw = (self.position.x-self.start_position)/size.x*2.*PI;
-        let pitch = f32::clamp(0., (1.-self.position.y/size.y)*PI/2., PI/2.);
+        let yaw = 0.;//(self.position.x-self.start_position)/size.x*2.*PI;
+        let pitch = PI/4.;//f32::clamp(0., (1.-self.position.y/size.y)*PI/2., PI/2.);
         let scale = size.x.min(size.y)*self.vertical_scroll;
         let z = p.z;
         let p = scale*rotate(p.xy(), yaw);
@@ -80,7 +85,7 @@ fn paint(&mut self, target: &mut Target, size: size) -> Result {
     let e = [vec3{x:1., y:0., z:0.}, vec3{x:0., y:1., z:0.}, vec3{x:0., y:0., z:1.}].map(|e| transform(e)-O);
     use rayon::prelude::*;
 
-	let mut Z = Image::fill(size, -1./2.);
+	/*let mut Z = Image::fill(size, -1./2.);
     self.buildings.into_par_iter().for_each(|(vertices, triangles)| {
         for triangle in triangles.iter() {
             let vertices = triangle.map(|i| vertices[i as usize]);
@@ -103,21 +108,22 @@ fn paint(&mut self, target: &mut Target, size: size) -> Result {
                         let i = (size.y-1-xy.y)*size.x+xy.x;
                         if !(z > Z[i as usize]) { continue; }
                         unsafe{(Z.as_ptr() as *mut f32).offset(i as isize).write(z)};
-						let [b,g,r] = &self.image;
+						/*let [b,g,r] = &self.image;
                         let u = ((x+1./2.)*(b.size.x as f32)) as u32;
                         let v = ((y+1./2.)*(b.size.y as f32)) as u32;
                         let index = v * b.stride + u;
                         let b = b[index as usize];
                         let g = g[index as usize];
                         let r = r[index as usize];
-                        unsafe{(target.as_ptr() as *mut bgra8).offset(i as isize).write(bgra8{b,g,r,a:0xFF})};
+                        unsafe{(target.as_ptr() as *mut bgra8).offset(i as isize).write(bgra8{b,g,r,a:0xFF})};*/
+                        unsafe{(target.as_ptr() as *mut bgra8).offset(i as isize).write(bgra8{b:0xFF,g:0xFF,r:0xFF,a:0xFF})};
                     }
                 }
             }
         }
-    });
+    });*/
 
-    let ground = &self.ground;
+    /*let ground = &self.ground;
     (0..ground.size.y-1).into_par_iter().for_each(|y| {
         for x in 0..ground.size.x-1 {
             let map = |x,y| xyz{x: (x as f32)/(ground.size.x as f32)-1./2., y: (y as f32)/(ground.size.y as f32)-1./2., z: ground[xy{x,y}]};
@@ -154,7 +160,7 @@ fn paint(&mut self, target: &mut Target, size: size) -> Result {
                 }
             }
         }
-    });
+    });*/
 
     /*use std::simd::{Simd, f32x16, u32x16};
     use std::arch::x86_64::*;
@@ -245,7 +251,7 @@ fn new(image: &str, points: &str) -> Result<Self> {
         Image::strided(size, ground.map(|data| &data[((min.y as u32)*stride+(min.x as u32)) as usize..][..(size.y*stride) as usize]), stride)
     };
 
-    let [r,g,b] = {
+    /*let [r,g,b] = {
         let size = size(image)?;
         let scale = size.x as f32 / (image_bounds.max - image_bounds.min).x;
         assert!(scale == 20.);
@@ -289,7 +295,7 @@ fn new(image: &str, points: &str) -> Result<Self> {
             let image = map("rgb", image).unwrap();
             Image::strided(size, image.map(|data| &data[plane*plane_stride + ((min.y as u32)*stride+(min.x as u32)) as usize..][..(size.y*stride) as usize]), stride)
         })
-    };
+    };*/
 
     /*let buildings = dxf::Drawing::load_file("../data/SWISSBUILDINGS3D_2_0_CHLV95LN02_1091-23.dxf")?.entities();
     std::fs::write("../.cache/las/1091-23.buildings", bincode::serialize(&buildings.collect::<Vec<_>>())?)?;*/
@@ -317,6 +323,32 @@ fn new(image: &str, points: &str) -> Result<Self> {
     } else { None }).collect::<Box<_>>();
     //println!("{} {}", buildings.iter().map(|(v,t)| v.len()*4+t.len()*3*2).sum::<usize>(), buildings.iter().map(|(_,t)| t.len()*3*4).sum::<usize>());
 
+    let oblique = iter::eval(|index| {
+        let orientation = index*90;
+        let decoder = png::Decoder::new(std::fs::File::open(format!("../data/47.38380,8.55692,{orientation}.png")).unwrap());
+        let (info, mut reader) = decoder.read_info().unwrap();
+        let size = xy{x:info.width, y:info.height};
+        let stride = size.x;
+        let plane_stride = (size.y*stride) as usize;
+        if false {
+            println!("{orientation}");
+            let mut buffer = vec![0; reader.output_buffer_size()];
+            reader.next_frame(&mut buffer).unwrap();
+            let image = &buffer[..info.buffer_size()];
+            let mut planar = unsafe{Box::new_uninit_slice(image.len()).assume_init()};
+            for i in 0..3 {
+                for y in 0..size.y {
+                    for x in 0..size.x {
+                        planar[i*plane_stride+(y*stride+x) as usize] = image[(y*stride+x) as usize * 3 + i];
+                    }
+                }
+            }
+            std::fs::write(format!("../.cache/las/{orientation}.rgb"), planar).unwrap();
+        }
+        let [r,g,b] = iter::eval(|plane| Image::new(size, map("rgb", &format!("{orientation}")).unwrap().map(|data:&[u8]| &data[plane*plane_stride..][..plane_stride])));
+        [b,g,r]
+    });
+
     /*let mut X = Vec::with_capacity(las::Read::header(&reader).number_of_points() as usize);
     let mut Y = Vec::with_capacity(las::Read::header(&reader).number_of_points() as usize);
     let mut Z = Vec::with_capacity(las::Read::header(&reader).number_of_points() as usize);
@@ -338,8 +370,9 @@ fn new(image: &str, points: &str) -> Result<Self> {
 
     let map = |field| map(field, points).unwrap();
     Ok(Self{
+        oblique,
     	ground,
-        image: [b,g,r],
+        //image: [b,g,r],
         buildings,
         x: map("x"), y: map("y"), z: map("z"),
         start_position: 0., position: xy{x:0.,y:f32::MAX}, vertical_scroll: 1.
