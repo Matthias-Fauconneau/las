@@ -17,7 +17,7 @@ type Mesh = (Box<[vec3]>, Box<[[u16; 3]]>);
 struct View {
     oblique: [[Image<Array<u8>>; 3]; 4],
 	ground: Image<Array<f32>>,
-    //ortho: [Image<Array<u8>>; 3],
+    ortho: [Image<Array<u8>>; 3],
     buildings: Box<[Mesh]>,
     x: Array,
     y: Array,
@@ -52,22 +52,25 @@ impl Widget for View {
 }
 
 fn paint(&mut self, target: &mut Target, size: size) -> Result {
-    for (index, image) in self.oblique.iter().enumerate() {
-        let [b,g,r] = &image;
+    let mut blit = |index, [b,g,r]:&[Image<Array<u8>>; 3]| {
         let image = &b;
-        let size = size/2;
-        let size = if size.x*image.size.y < size.y*image.size.x
-        { xy{x: size.x, y: image.size.y*size.x/image.size.x} } else
-        { xy{x: image.size.x*size.y/image.size.y, y: size.y} };
-        let offset = size/2;
+        let target_size = size/xy{x: 3, y: 2};
+        let size = if target_size.x*image.size.y < target_size.y*image.size.x
+        { xy{x: target_size.x, y: image.size.y*target_size.x/image.size.x} } else
+        { xy{x: image.size.x*target_size.y/image.size.y, y: target_size.y} };
+        let offset = (target_size-size)/2;
         for y in 0..size.y {
             for x in 0..size.x {
-                let i = (y*size.y/image.size.y*image.stride+x*size.x/image.size.x) as usize;
+                //let i = (y*image.size.y/size.y*image.stride+x*image.size.x/size.x) as usize;
+                let i = ((image.size.y/2-size.y/2+y)*image.stride+image.size.x/2-size.x/2+x) as usize;
                 let [b,g,r] = [b.data[i],g.data[i],r.data[i]];
-                target.data[((index as u32/2*target.size.y/2+offset.y+y)*target.stride+index as u32%2*target.size.x/2+offset.x+x) as usize] = image::bgra{b, g, r, a: 0xFF};
+                let i = (index as u32/3*target.size.y/2+offset.y+y)*target.stride+(index as u32%3)*target.size.x/3+offset.x+x;
+                if (i as usize) < target.len() { target.data[i as usize] = image::bgra{b, g, r, a: 0xFF}; }
             }
         }
-    }
+    };
+    for (index, image) in self.oblique.iter().enumerate() { blit(index, image); }
+    blit(4, &self.ortho);
 
     //target.fill(bgra8{b:0,g:0,r:0,a:0xFF});
     let transform = |p:vec3| {
@@ -251,7 +254,7 @@ fn new(image: &str, points: &str) -> Result<Self> {
         Image::strided(size, ground.map(|data| &data[((min.y as u32)*stride+(min.x as u32)) as usize..][..(size.y*stride) as usize]), stride)
     };
 
-    /*let [r,g,b] = {
+    let [r,g,b] = {
         let size = size(image)?;
         let scale = size.x as f32 / (image_bounds.max - image_bounds.min).x;
         assert!(scale == 20.);
@@ -292,10 +295,10 @@ fn new(image: &str, points: &str) -> Result<Self> {
 
         let size = xy{x: max.x as u32 - min.x as u32, y: max.y as u32 - min.y as u32};
         iter::eval(|plane| {
-            let image = map("rgb", image).unwrap();
+            let image = map("bil", image).unwrap();
             Image::strided(size, image.map(|data| &data[plane*plane_stride + ((min.y as u32)*stride+(min.x as u32)) as usize..][..(size.y*stride) as usize]), stride)
         })
-    };*/
+    };
 
     /*let buildings = dxf::Drawing::load_file("../data/SWISSBUILDINGS3D_2_0_CHLV95LN02_1091-23.dxf")?.entities();
     std::fs::write("../.cache/las/1091-23.buildings", bincode::serialize(&buildings.collect::<Vec<_>>())?)?;*/
@@ -326,14 +329,14 @@ fn new(image: &str, points: &str) -> Result<Self> {
     let oblique = iter::eval(|index| {
         let orientation = index*90;
         let decoder = png::Decoder::new(std::fs::File::open(format!("../data/47.38380,8.55692,{orientation}.png")).unwrap());
-        let (info, mut reader) = decoder.read_info().unwrap();
-        let size = xy{x:info.width, y:info.height};
+        let mut reader = decoder.read_info().unwrap();
+        let size = xy{x:reader.info().width, y:reader.info().height};
         let stride = size.x;
         let plane_stride = (size.y*stride) as usize;
         if false {
             println!("{orientation}");
             let mut buffer = vec![0; reader.output_buffer_size()];
-            reader.next_frame(&mut buffer).unwrap();
+            let info = reader.next_frame(&mut buffer).unwrap();
             let image = &buffer[..info.buffer_size()];
             let mut planar = unsafe{Box::new_uninit_slice(image.len()).assume_init()};
             for i in 0..3 {
@@ -372,7 +375,7 @@ fn new(image: &str, points: &str) -> Result<Self> {
     Ok(Self{
         oblique,
     	ground,
-        //image: [b,g,r],
+        ortho: [b,g,r],
         buildings,
         x: map("x"), y: map("y"), z: map("z"),
         start_position: 0., position: xy{x:0.,y:f32::MAX}, vertical_scroll: 1.
