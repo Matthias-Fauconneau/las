@@ -23,9 +23,6 @@ ash={git='https://github.com/Matthias-Fauconneau/ash'}
 #tiff={path='../image-tiff'}
 #jpeg-decoder={path="../jpeg-decoder"}
 
-[patch.'https://github.com/Matthias-Fauconneau/image']
-image={path='../image'}
-
 [profile.dev]
 opt-level = 3
 overflow-checks = false

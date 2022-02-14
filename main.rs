@@ -59,15 +59,17 @@ fn paint(&mut self, target: &mut Target, size: size) -> Result {
         { xy{x: source.x*size.y/source.y, y: size.y} };
         target.slice_mut((size-fit)/2, fit)
     }
-    let blit = |target:&mut Image<&mut[_]>, [b,g,r]:&[Image<Array<u8>>; 3]|
-        for y in 0..target.size.y {
-            for x in 0..target.size.x {
-                let i = (y*b.size.y/target.size.y*b.stride+x*b.size.x/target.size.x) as usize;
+    let blit = |target:&mut Image<&mut[_]>, [b,g,r]:&[Image<Array<u8>>; 3]| {
+        let size = target.size;
+        for y in 0..size.y {
+            for x in 0..size.x {
+                let i = (y*b.size.y/size.y*b.stride+x*b.size.x/size.x) as usize;
                 //let i = ((image.size.y/2-size.y/2+y)*image.stride+image.size.x/2-size.x/2+x) as usize;
                 let [b,g,r] = [b.data[i],g.data[i],r.data[i]];
-                target[xy{x,y}] = bgra{b, g, r, a: 0xFF};
+                target[xy{x, y: size.y-1-y}] = bgra{b:b/2, g:g/2, r:r/2, a: 0xFF};
             }
-        };
+        }
+    };
     //for (index, image) in self.oblique.iter().enumerate() { blit(fit(sub(index), image[0].size), index, image); }
     //blit(fit(sub(4), self.ortho[0].size), &self.ortho);
     /*{
@@ -82,10 +84,11 @@ fn paint(&mut self, target: &mut Target, size: size) -> Result {
         }
     }*/
     blit(&mut fit(target, self.ortho[0].size), &self.ortho);
+
     self.buildings.iter().for_each(|(vertices, triangles)| {
         for triangle in triangles.iter() {
             let vertices = triangle.map(|i| vertices[i as usize]);
-            let view = vertices.map(|xyz{x,y,..}| { let size = vec2::from(size); size/2. + size.y * xy{x,y: -y}});
+            let view = vertices.map(|xyz{x,y,..}| { let size = vec2::from(size); size/2. + size.y * xy{x,y}});
             let [v0,v1,v2] = view;
             use vector::cross;
             let w = cross(v1-v0, v2-v0);
@@ -96,21 +99,22 @@ fn paint(&mut self, target: &mut Target, size: size) -> Result {
             let max = xy{x: u32::min(max.x as u32+1, size.x), y: u32::min(max.y as u32+1, size.y)};
             for y in min.y as u32 .. max.y {
                 for x in min.x as u32 .. max.x {
-                    let xy = xy{x,y};
-                    let p = xy.map(|&c| c as f32);
+                    let p = xy{x: x as f32, y: y as f32};
                     let (w2,w0,w1) = (cross(v1-v0, p-v0), cross(v2-v1, p-v1), cross(v0-v2, p-v2));
                     if w2 > 0. && w0 > 0. && w1 > 0. {
-                        let xyz{x,y,..} = (w0*vertices[0] + w1*vertices[1] + w2*vertices[2])/w;
-                        let [b,g,r] = &self.ortho;
-                        let u = ((x+1./2.)*(b.size.x as f32)) as u32;
-                        let v = ((y+1./2.)*(b.size.y as f32)) as u32;
-                        let index = (b.size.y-1-v) * b.stride + u;
-                        let b = b[index as usize];
-                        //let g = image::sRGB(&y);
-                        //let r = image::sRGB(&x);
-                        let g = g[index as usize];
-                        let r = r[index as usize];
-                        target[(xy.y*size.x+xy.x) as usize] = bgra8{b,g,r,a:0xFF};
+                        target[xy{x,y: size.y-1-y}] = {
+                            let xyz{x,y,..} = (w0*vertices[0] + w1*vertices[1] + w2*vertices[2])/w;
+                            let [b,g,r] = &self.ortho;
+                            let u = ((x+1./2.)*(b.size.x as f32)) as u32;
+                            let v = ((y+1./2.)*(b.size.y as f32)) as u32;
+                            let index = v * b.stride + u;
+                            let b = b[index as usize];
+                            //let g = image::sRGB(&y);
+                            //let r = image::sRGB(&x);
+                            let g = g[index as usize];
+                            let r = r[index as usize];
+                            bgra8{b,g,r,a:0xFF}
+                        };
                     }
                 }
             }
@@ -341,7 +345,7 @@ fn new(image: &str, points: &str) -> Result<Self> {
 
         let size = xy{x: max.x as u32 - min.x as u32, y: max.y as u32 - min.y as u32};
         iter::eval(|plane| {
-            let image = map("bil", image).unwrap();
+            let image = map("rgb", image).unwrap();
             Image::strided(size, image.map(|data| &data[plane*plane_stride + ((min.y as u32)*stride+(min.x as u32)) as usize..][..(size.y*stride) as usize]), stride)
         })
     };
