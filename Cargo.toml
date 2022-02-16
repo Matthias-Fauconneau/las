@@ -4,11 +4,13 @@ bin=[{name='main', path='main.rs'}]
 [dependencies]
 fehler='*'
 iter={git='https://github.com/Matthias-Fauconneau/iter'}
+ordered-float= "*"
 vector={git='https://github.com/Matthias-Fauconneau/vector'}
 ui={git='https://github.com/Matthias-Fauconneau/ui'}
 memmap={version='*', package='memmap2'}
 owning-ref={package='owning_ref', version = "*"}
 bytemuck={version="*", features = ['extern_crate_alloc']}
+num={git='https://github.com/Matthias-Fauconneau/num'}
 image={git='https://github.com/Matthias-Fauconneau/image'}
 rayon="*"
 tiff='*'
@@ -22,6 +24,8 @@ ash-window={git='https://github.com/Matthias-Fauconneau/ash'}
 ash={git='https://github.com/Matthias-Fauconneau/ash'}
 #tiff={path='../image-tiff'}
 #jpeg-decoder={path="../jpeg-decoder"}
+[patch.'https://github.com/Matthias-Fauconneau/vector']
+vector={path='../vector'}
 
 [profile.dev]
 opt-level = 3

@@ -1,4 +1,4 @@
-#![feature(type_alias_impl_trait, portable_simd, stdsimd, let_else, new_uninit)]
+#![feature(type_alias_impl_trait, portable_simd, stdsimd, let_else, new_uninit, array_methods)]
 #![allow(non_snake_case)]
 
 use {ui::{Error, Result}, fehler::throws};
@@ -34,6 +34,31 @@ fn rotate(xy{x,y,..}: vec2, angle: f32) -> vec2 { xy{x: f32::cos(angle)*x+f32::s
 
 use vector::MinMax;
 
+
+/*fn sub<T, D:std::ops::DerefMut<Target=[T]>>(target: &mut Image<D>, index: usize) {
+    let size = target.size/xy{x: 3, y: 2};
+    target.slice_mut(xy{x: index as u32%3, y:index as u32/3}*size, size)
+}*/
+
+fn fit<'m, T>(target: &'m mut Image<&mut[T]>, source: size) -> Image<&'m mut [T]> {
+    let size = target.size;
+    let fit = if size.x*source.y < size.y*source.x
+    { xy{x: size.x, y: source.y*size.x/source.x} } else
+    { xy{x: source.x*size.y/source.y, y: size.y} };
+    target.slice_mut((size-fit)/2, fit)
+}
+
+fn blit(target:&mut Image<&mut[bgra8]>, [b,g,r]: &[Image<&[u8]>; 3]) {
+    let size = target.size;
+    for y in 0..size.y {
+        for x in 0..size.x {
+            let i = (y*b.size.y/size.y*b.stride+x*b.size.x/size.x) as usize;
+            let [b,g,r] = [b.data[i],g.data[i],r.data[i]];
+            target[xy{x, y: size.y-1-y}] = bgra{b:b/2, g:g/2, r:r/2, a: 0xFF};
+        }
+    }
+}
+
 impl Widget for View {
 #[throws] fn event(&mut self, _size: size, _event_context: &EventContext, event: &Event) -> bool {
     match event {
@@ -50,45 +75,97 @@ impl Widget for View {
     }
 }
 
-fn paint(&mut self, target: &mut Target, size: size) -> Result {
-    //let sub = |index| { let size = size/xy{x: 3, y: 2}; target.slice_mut(xy{x: index as u32%3, y:index as u32/3}*size, size) };
-    fn fit<'m, T>(target: &'m mut Image<&mut[T]>, source: size) -> Image<&'m mut [T]> {
-        let size = target.size;
-        let fit = if size.x*source.y < size.y*source.x
-        { xy{x: size.x, y: source.y*size.x/source.x} } else
-        { xy{x: source.x*size.y/source.y, y: size.y} };
-        target.slice_mut((size-fit)/2, fit)
-    }
-    let blit = |target:&mut Image<&mut[_]>, [b,g,r]:&[Image<Array<u8>>; 3]| {
-        let size = target.size;
-        for y in 0..size.y {
-            for x in 0..size.x {
-                let i = (y*b.size.y/size.y*b.stride+x*b.size.x/size.x) as usize;
-                //let i = ((image.size.y/2-size.y/2+y)*image.stride+image.size.x/2-size.x/2+x) as usize;
-                let [b,g,r] = [b.data[i],g.data[i],r.data[i]];
-                target[xy{x, y: size.y-1-y}] = bgra{b:b/2, g:g/2, r:r/2, a: 0xFF};
+fn paint(&mut self, target: &mut Target, _size: size) -> Result {
+    let ord = |x:f32| -> ordered_float::NotNan<f32> { ordered_float::NotNan::new(x).unwrap() };
+    let from_normalized = |size: size, xyz{x,y,..}: xyz<f32>| { let size = vec2::from(size); size/2. + size.y * xy{x,y}};
+
+    let building = self.buildings.iter().max_by_key(|(vertices,_)| vertices.iter().map(|&xyz{z,..}| ord(z)).max()).unwrap();
+    let MinMax{min,max} = vector::minmax(building.0.iter().copied()).unwrap();
+    let MinMax{min,max} = {let size = max-min; MinMax{min: min-size, max: max+size}};
+    let crop = |p:vec3| (p-(min+max)/2.)/(max-min);
+    let ortho = {
+        let MinMax{min,max} = MinMax{min: from_normalized(self.ortho[0].size, min).map(|&c| c as u32), max: from_normalized(self.ortho[0].size, max).map(|&c| c as u32 + 1)};
+        self.ortho.each_ref().map(|c| c.slice(min, max-min))
+    };
+
+    //for (index, image) in self.oblique.iter().enumerate() { blit(fit(sub(index), image[0].size), index, image); }
+    //blit(fit(sub(4), self.ortho[0].size), &self.ortho);
+    let mut target = fit(target, ortho[0].size);
+    blit(&mut target, &ortho);
+
+    let roof = {
+        let (vertices, triangles) = building;
+        let mut set = Vec::new();
+        use vector::{cross, normalize};
+        for triangle in triangles.iter() {
+            let triangle = triangle.map(|i| vertices[i as usize]);
+            let cross = |a:vec3,b:vec3| vec3{x: cross(a.yz(), b.yz()), y: cross(a.zx(), b.zx()), z: cross(a.xy(), b.xy())};
+            let [v0,v1,v2] = triangle;
+            let n = normalize(cross(v1-v0, v2-v0));
+            if n.z > 1./2. { for v in triangle { if !set.contains(&v) { set.push(v); } } }
+        }
+        let mut hull = vec![*set.iter().min_by_key(|&&xyz{x,..}| ord(x)).unwrap()];
+        loop {
+            let &last = hull.last().unwrap();
+            let mut candidate = set[0];
+            for &p in &set {
+                let angle = cross((candidate-last).xy(), (p-last).xy());
+                if candidate == last || angle < 0. {
+                    candidate = p;
+                    //println!("{candidate:?} => {p:?}");
+                }
+            }
+            if candidate == hull[0] { break; }
+            hull.push(candidate);
+        }
+        hull
+    };
+    assert!(roof.len() == 4);
+    //println!("{roof:?}");
+    let mut disk = |point, r| {
+        if point < min || point > max { return; }
+        let p = from_normalized(target.size, crop(point)).map(|&c| c as i32);
+        let min = xy{x: i32::max(0, p.x - r as i32) as u32, y: i32::max(0, p.y - r as i32) as u32};
+        let max = xy{x: u32::min(p.x as u32+r+1, target.size.x), y: u32::min(p.y as u32+r+1, target.size.y)};
+        for y in min.y .. max.y {
+            for x in min.x .. max.x {
+                if vector::sq(xy{x: x as i32,y: y as i32}-p.map(|&c| c as i32)) as u32 > r*r { continue; }
+                let size = target.size;
+                target[xy{x,y: size.y-1-y}] = {
+                    let [b,g,r] = &ortho;
+                    let xy{x,y} = (from_normalized(b.size, crop(point)).map(|&c| c as i32) + xy{
+                        x: (x as i32 - p.x) * b.size.x as i32 / size.x as i32,
+                        y: (y as i32 - p.y) * b.size.y as i32 / size.y as i32
+                    }).map(|&c| c as u32);
+                    let index = y * b.stride + x;
+                    if (index as usize) < b.len() {
+                        let b = b[index as usize];
+                        //let g = image::sRGB(&y);
+                        //let r = image::sRGB(&x);
+                        let g = g[index as usize];
+                        let r = r[index as usize];
+                        bgra8{b,g,r,a:0xFF}
+                    } else {
+                        bgra8{b:0,g:0,r:0xFF,a:0xFF}
+                    }
+                };
             }
         }
     };
-    //for (index, image) in self.oblique.iter().enumerate() { blit(fit(sub(index), image[0].size), index, image); }
-    //blit(fit(sub(4), self.ortho[0].size), &self.ortho);
-    /*{
-        let target = fit(target, self.ortho[0].size);
-        for y in 0..target.size.y {
-            for x in 0..target.size.x {
-                let [b,g,r] = &self.ortho;
-                let i = (y*b.size.y/target.size.y*b.stride+x*b.size.x/target.size.x) as usize;
-                let [b,g,r] = [b.data[i],g.data[i],r.data[i]];
-                target[xy{x,y}] = bgra{b, g, r, a: 0xFF};
-            }
-        }
-    }*/
-    blit(&mut fit(target, self.ortho[0].size), &self.ortho);
+    if true { for point in roof { disk(point, 64); }}
 
-    self.buildings.iter().for_each(|(vertices, triangles)| {
+    if true {
+        let [x,y,z] = [&self.x, &self.y, &self.z];
+        use std::iter::zip;
+        println!("Points");
+        for ((&x, &y), &z) in zip(zip(&**x,&**y),&**z) { disk(xyz{x,y,z}, 0); }
+        println!("OK");
+    }
+
+    if false { self.buildings.iter().for_each(|(vertices, triangles)| {
         for triangle in triangles.iter() {
             let vertices = triangle.map(|i| vertices[i as usize]);
-            let view = vertices.map(|xyz{x,y,..}| { let size = vec2::from(size); size/2. + size.y * xy{x,y}});
+            let view = vertices.map(|point| from_normalized(target.size, crop(point)));
             let [v0,v1,v2] = view;
             use vector::cross;
             let w = cross(v1-v0, v2-v0);
@@ -96,12 +173,13 @@ fn paint(&mut self, target: &mut Target, size: size) -> Result {
 			if w <= 0. { continue; }
             let MinMax{min,max} : MinMax<vec2> = vector::minmax(view.into_iter()).unwrap();
             let min = xy{x: f32::max(0., min.x), y: f32::max(0., min.y)};
-            let max = xy{x: u32::min(max.x as u32+1, size.x), y: u32::min(max.y as u32+1, size.y)};
+            let max = xy{x: u32::min(max.x as u32+1, target.size.x), y: u32::min(max.y as u32+1, target.size.y)};
             for y in min.y as u32 .. max.y {
                 for x in min.x as u32 .. max.x {
                     let p = xy{x: x as f32, y: y as f32};
                     let (w2,w0,w1) = (cross(v1-v0, p-v0), cross(v2-v1, p-v1), cross(v0-v2, p-v2));
                     if w2 > 0. && w0 > 0. && w1 > 0. {
+                        let size = target.size;
                         target[xy{x,y: size.y-1-y}] = {
                             let xyz{x,y,..} = (w0*vertices[0] + w1*vertices[1] + w2*vertices[2])/w;
                             let [b,g,r] = &self.ortho;
@@ -119,7 +197,7 @@ fn paint(&mut self, target: &mut Target, size: size) -> Result {
                 }
             }
         }
-    });
+    });}
 
     //target.fill(bgra8{b:0,g:0,r:0,a:0xFF});
     /*let transform = |p:vec3| {
@@ -135,8 +213,7 @@ fn paint(&mut self, target: &mut Target, size: size) -> Result {
         p
     };
     let O = transform(vec3{x:0., y:0., z:0.});
-    let e = [vec3{x:1., y:0., z:0.}, vec3{x:0., y:1., z:0.}, vec3{x:0., y:0., z:1.}].map(|e| transform(e)-O);
-    use rayon::prelude::*;*/
+    let e = [vec3{x:1., y:0., z:0.}, vec3{x:0., y:1., z:0.}, vec3{x:0., y:0., z:1.}].map(|e| transform(e)-O);*/
 
 	/*let mut Z = Image::fill(size, -1./2.);
     self.buildings.into_par_iter().for_each(|(vertices, triangles)| {
@@ -384,7 +461,7 @@ fn new(image: &str, points: &str) -> Result<Self> {
         let stride = size.x;
         let plane_stride = (size.y*stride) as usize;
         if false {
-            println!("{orientation}");
+            //println!("{orientation}");
             let mut buffer = vec![0; reader.output_buffer_size()];
             let info = reader.next_frame(&mut buffer).unwrap();
             let image = &buffer[..info.buffer_size()];
