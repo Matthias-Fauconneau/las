@@ -92,7 +92,9 @@ impl Widget for View {
         &Event::Button{position, state: ui::widget::ButtonState::Pressed, ..} => {
             let position = position.map(|&c| c as u32);
             let f = |index: usize, (offset, size): (uint2, size), source: size| if position > offset && position < offset+size {
-                let xy{x,y} = (position-offset)*source/size;
+                let xy{x,y} = (position-offset);
+                let y = size.y-1-y;
+                let xy{x,y} = xy{x,y}*source/size;
                 println!("{index} {x} {y}");
             };
             for (index, image) in self.oblique.iter().enumerate() { f(index, fit(sub(size, index), image[0].size), image[0].size); }
@@ -104,8 +106,75 @@ impl Widget for View {
 }
 
 fn paint(&mut self, target: &mut Target, _size: size) -> Result {
-    for (index, image) in self.oblique.iter().enumerate() { blit(&mut fit_image(&mut sub_image(target, index), image[0].size), &image.each_ref().map(|image| image.as_ref())); }
+    //for (index, image) in self.oblique.iter().enumerate() { blit(&mut fit_image(&mut sub_image(target, index), image[0].size), &image.each_ref().map(|image| image.as_ref())); }
     blit(&mut fit_image(&mut sub_image(target, 4), self.ortho[0].size), &self.ortho.each_ref().map(|image| image.as_ref()));
+
+    type mat3 = [[f32; 3]; 3];
+    fn apply(M: mat3, v: vec2) -> vec2 { iter::eval(|i| v.x*M[i][0]+v.y*M[i][1]+M[i][2]).into() }
+
+    fn mul(a: mat3, b: mat3) -> mat3 { iter::eval(|i| iter::eval(|j| (0..3).map(|k| a[i][k]*b[k][j]).sum())) }
+    fn det(M: mat3) -> f32 {
+        let M = |i: usize, j: usize| M[i][j];
+        M(0,0) * (M(1,1) * M(2,2) - M(2,1) * M(1,2)) -
+        M(0,1) * (M(1,0) * M(2,2) - M(2,0) * M(1,2)) +
+        M(0,2) * (M(1,0) * M(2,1) - M(2,0) * M(1,1))
+    }
+    fn transpose(M: mat3) -> mat3 { iter::eval(|i| iter::eval(|j| M[j][i])) }
+    fn cofactor(M: mat3) -> mat3 { let M = |i: usize, j: usize| M[i][j]; [
+      [(M(1,1) * M(2,2) - M(2,1) * M(1,2)), -(M(1,0) * M(2,2) - M(2,0) * M(1,2)),   (M(1,0) * M(2,1) - M(2,0) * M(1,1))],
+     [-(M(0,1) * M(2,2) - M(2,1) * M(0,2)),   (M(0,0) * M(2,2) - M(2,0) * M(0,2)),  -(M(0,0) * M(2,1) - M(2,0) * M(0,1))],
+      [(M(0,1) * M(1,2) - M(1,1) * M(0,2)),  -(M(0,0) * M(1,2) - M(1,0) * M(0,2)),   (M(0,0) * M(1,1) - M(0,1) * M(1,0))],
+    ] }
+    fn adjugate(M: mat3) -> mat3 { transpose(cofactor(M)) }
+    fn scale(s: f32, M: mat3) -> mat3 { M.map(|row| row.map(|e| s*e)) }
+    fn inverse(M: mat3) -> mat3 { scale(1./det(M), adjugate(M)) }
+
+    let points : [[uint2; 5]; 3] = iter::eval(|point| (&*std::str::from_utf8(&std::fs::read(format!("../data/{point}")).unwrap()).unwrap().lines().map(|line| {
+        let [x, y] : [u32;2] = (&*line.split(' ').map(|c| str::parse(c).unwrap()).collect::<Box<_>>()).try_into().unwrap();
+        uint2{x,y}
+    }).collect::<Box<_>>()).try_into().unwrap());
+    let points : [[uint2; 5]; 3] = points.map(|point| iter::eval(|image| { let xy{x,y} = point[image]; xy{x, y: if image<4 { &self.oblique[image] } else { &self.ortho }[0].size.y-1-y}}));
+
+    let (_, size) = fit(sub(target.size, 0), self.ortho[0].size);
+    let X : [vec2; 3] = points.map(|p| p[4].map(|&c| c as f32)*vec2::from(size)/vec2::from(self.ortho[0].size));
+
+    for (index, image) in self.oblique.iter().enumerate() {
+        let Y : [uint2; 3] = points.map(|p| p[index]);
+        let A = {
+            let X = [
+                X.map(|p| p.x as f32),
+                X.map(|p| p.y as f32),
+                [1.; 3]
+            ];
+            let Y = [
+                Y.map(|p| p.x as f32),
+                Y.map(|p| p.y as f32),
+                [1.; 3]
+            ];
+            mul(Y, inverse(X))
+        };
+        for (x, y) in std::iter::zip(X, Y) {
+            println!("{x:?} {y:?}");
+            assert!(norm(apply(A, vec2::from(x)) - vec2::from(y))<1.);
+        }
+        affine_blit(&mut fit_image(&mut sub_image(target, index), self.ortho[0].size), &image.each_ref().map(|image| image.as_ref()), A);
+        fn affine_blit(target:&mut Image<&mut[bgra8]>, [b,g,r]: &[Image<&[u8]>; 3], A: mat3) {
+            let size = target.size;
+            println!("{size:?} {:?}", b.size);
+            for y in 0..size.y {
+                for x in 0..size.x {
+                    let [b,g,r] = {
+                        let xy{x,y} = apply(A, xy{x: x as f32,y: y as f32}).map(|&c| c as u32);
+                        if x >= b.size.x || y >= b.size.y { continue; }
+                        let i = (y*b.stride+x) as usize;
+                        [b.data[i],g.data[i],r.data[i]]
+                    };
+                    target[xy{x, y: size.y-1-y}] = bgra{b, g, r, a: 0xFF};
+                }
+            }
+        }
+    }
+
 /*
     let ord = |x:f32| -> ordered_float::NotNan<f32> { ordered_float::NotNan::new(x).unwrap() };
     use image::sRGB;
