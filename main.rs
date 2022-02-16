@@ -28,7 +28,7 @@ struct View {
     vertical_scroll: f32,
 }
 
-use {vector::{xy, size, vec2, xyz, vec3}, ui::{Widget, RenderContext as Target, widget::{EventContext, Event}}, vector::num::IsZero};
+use {vector::{xy, uint2, size, vec2, xyz, vec3}, ui::{Widget, RenderContext as Target, widget::{EventContext, Event}}, vector::num::IsZero};
 
 fn rotate(xy{x,y,..}: vec2, angle: f32) -> vec2 { xy{x: f32::cos(angle)*x+f32::sin(angle)*y, y: f32::cos(angle)*y-f32::sin(angle)*x} }
 
@@ -77,14 +77,20 @@ impl Widget for View {
 
 fn paint(&mut self, target: &mut Target, _size: size) -> Result {
     let ord = |x:f32| -> ordered_float::NotNan<f32> { ordered_float::NotNan::new(x).unwrap() };
-    let from_normalized = |size: size, xyz{x,y,..}: xyz<f32>| { let size = vec2::from(size); size/2. + size.y * xy{x,y}};
+    let from_normalized = |size: size, xy{x,y,..}: xy<f32>| { let size = vec2::from(size); size/2. + size * xy{x,y}};
+    let to_normalized = |size: size, xy{x,y,..}: xy<f32>| { let size = vec2::from(size); (xy{x,y} - size/2.) / size };
+    let floor = |size: size, p| to_normalized(size, from_normalized(size, p).map(|&c| f32::floor(c)));
+    let ceil = |size: size, p| to_normalized(size, from_normalized(size, p).map(|&c| f32::ceil(c)));
 
     let building = self.buildings.iter().max_by_key(|(vertices,_)| vertices.iter().map(|&xyz{z,..}| ord(z)).max()).unwrap();
     let MinMax{min,max} = vector::minmax(building.0.iter().copied()).unwrap();
-    let MinMax{min,max} = {let size = max-min; MinMax{min: min-size, max: max+size}};
-    let crop = |p:vec3| (p-(min+max)/2.)/(max-min);
+    let MinMax{min,max} = MinMax{min: min.xy(), max: max.xy()};
+    let MinMax{min,max} = { let size = xy{x:16.,y:16.}/vec2::from(self.ortho[0].size); MinMax{min: min-size, max: max+size}};
+    //let MinMax{min,max} = {let size = max-min; MinMax{min: min-size, max: max+size}};
+    let MinMax{min,max} = MinMax{min: floor(self.ortho[0].size, min), max: ceil(self.ortho[0].size, max)};
+    let crop = |p:vec2| (p-(min+max)/2.)/(max-min);
     let ortho = {
-        let MinMax{min,max} = MinMax{min: from_normalized(self.ortho[0].size, min).map(|&c| c as u32), max: from_normalized(self.ortho[0].size, max).map(|&c| c as u32 + 1)};
+        let MinMax{min,max} = MinMax{min: from_normalized(self.ortho[0].size, min).map(|&c| c as u32), max: from_normalized(self.ortho[0].size, max).map(|&c| f32::ceil(c) as u32)};
         self.ortho.each_ref().map(|c| c.slice(min, max-min))
     };
 
@@ -123,49 +129,69 @@ fn paint(&mut self, target: &mut Target, _size: size) -> Result {
     assert!(roof.len() == 4);
     //println!("{roof:?}");
     let mut disk = |point, r| {
-        if point < min || point > max { return; }
-        let p = from_normalized(target.size, crop(point)).map(|&c| c as i32);
-        let min = xy{x: i32::max(0, p.x - r as i32) as u32, y: i32::max(0, p.y - r as i32) as u32};
-        let max = xy{x: u32::min(p.x as u32+r+1, target.size.x), y: u32::min(p.y as u32+r+1, target.size.y)};
-        for y in min.y .. max.y {
-            for x in min.x .. max.x {
-                if vector::sq(xy{x: x as i32,y: y as i32}-p.map(|&c| c as i32)) as u32 > r*r { continue; }
-                let size = target.size;
-                target[xy{x,y: size.y-1-y}] = {
-                    let [b,g,r] = &ortho;
-                    let xy{x,y} = (from_normalized(b.size, crop(point)).map(|&c| c as i32) + xy{
-                        x: (x as i32 - p.x) * b.size.x as i32 / size.x as i32,
-                        y: (y as i32 - p.y) * b.size.y as i32 / size.y as i32
-                    }).map(|&c| c as u32);
-                    let index = y * b.stride + x;
-                    if (index as usize) < b.len() {
-                        let b = b[index as usize];
-                        //let g = image::sRGB(&y);
-                        //let r = image::sRGB(&x);
-                        let g = g[index as usize];
-                        let r = r[index as usize];
-                        bgra8{b,g,r,a:0xFF}
-                    } else {
-                        bgra8{b:0,g:0,r:0xFF,a:0xFF}
-                    }
-                };
+        //if point < min || point > max { return; }
+        struct Feature { p: uint2, min_ssd: u32 }
+        let mut feature = Feature{p: xy{x:0, y:0}, min_ssd: 0};
+        let size = target.size;
+        {
+            let p = from_normalized(target.size, crop(point)).map(|&c| c as i32);
+            let min = xy{x: i32::max(0, p.x - r as i32) as u32, y: i32::max(0, p.y - r as i32) as u32};
+            let max = xy{x: u32::min(p.x as u32+r+1, target.size.x), y: u32::min(p.y as u32+r+1, target.size.y)};
+            for y in min.y .. max.y {
+                for x in min.x .. max.x {
+                    let w2 = (r*r) as i32 - vector::sq(xy{x: x as i32,y: y as i32}-p);
+                    if w2 <= 0 { continue; }
+                    let w2 = w2 as u32;
+                    target[xy{x,y: size.y-1-y}] = {
+                        let [b,g,r] = &ortho;
+                        let xy{x,y} = (from_normalized(b.size, crop(point)).map(|&c| c as i32) + xy{
+                            x: (x as i32 - p.x) * b.size.x as i32 / size.x as i32,
+                            y: (y as i32 - p.y) * b.size.y as i32 / size.y as i32
+                        }).map(|&c| c as u32);
+                        let index = y * b.stride + x;
+                        let g0 = g[index as usize];
+                        let mut min = u16::MAX;
+                        for [dx,dy] in [[-1,-1],[0,-1],[1,-1],[-1,0],[1,0],[-1,1],[0,1],[1,1]] {
+                            let g = g[(index as i32+dy*g.stride as i32 + dx) as usize];
+                            let ssd = num::sq(g as i16 - g0 as i16) as u16;
+                            if ssd < min { min = ssd; }
+                        }
+                        let min = w2 * min as u32;
+                        if min > feature.min_ssd { feature = Feature{p: xy{x,y}, min_ssd: min}; }
+                        if false {
+                            let v = u32::min(min, 0xFF) as u8; //f32::sqrt(min as f32) as u8;
+                            bgra8{b:v,g:v,r:v,a:0xFF}
+                        } else {
+                            let b = b[index as usize];
+                            let g = g[index as usize];
+                            let r = r[index as usize];
+                            bgra8{b,g,r,a:0xFF}
+                        }
+                    };
+                }
             }
         }
+        let Feature{p, ..} = feature;
+        let xy{x,y} = p*target.size/ortho[0].size;
+        for dx in -4..4+1 { target[xy{x: (x as i32+dx) as u32,y: size.y-1-y}] = bgra8{b:0,g:0,r:0xFF,a:0xFF}; }
+        for dy in -4..4+1 { target[xy{x,y: size.y-1-(y as i32+dy) as u32}] = bgra8{b:0,g:0,r:0xFF,a:0xFF}; }
     };
-    if true { for point in roof { disk(point, 64); }}
+    if true { for point in roof { disk(point.xy(), 64); }}
 
-    if true {
+    if false {
+        let scale = vec2::from(target.size)/(max-min);
         let [x,y,z] = [&self.x, &self.y, &self.z];
-        use std::iter::zip;
-        println!("Points");
-        for ((&x, &y), &z) in zip(zip(&**x,&**y),&**z) { disk(xyz{x,y,z}, 0); }
-        println!("OK");
+        use rayon::prelude::*;
+        (&**x, &**y, &**z).into_par_iter().for_each(|(&x, &y, &z)| {
+            let p = (scale*(xy{x,y}-min)).map(|&c| c as u32);
+            if p < target.size { unsafe{(target.as_ptr() as *mut bgra8).offset(((target.size.y-1-p.y)*target.stride+p.x) as isize).write(bgra8{b:0,g:0,r:0xFF,a:0xFF})}; }
+        });
     }
 
-    if false { self.buildings.iter().for_each(|(vertices, triangles)| {
+    if true { self.buildings.iter().for_each(|(vertices, triangles)| {
         for triangle in triangles.iter() {
             let vertices = triangle.map(|i| vertices[i as usize]);
-            let view = vertices.map(|point| from_normalized(target.size, crop(point)));
+            let view = vertices.map(|point| from_normalized(target.size, crop(point.xy())));
             let [v0,v1,v2] = view;
             use vector::cross;
             let w = cross(v1-v0, v2-v0);
