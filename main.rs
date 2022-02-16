@@ -43,12 +43,21 @@ use vector::MinMax;
 fn fit<'m, T>(target: &'m mut Image<&mut[T]>, source: size) -> Image<&'m mut [T]> {
     let size = target.size;
     let fit = if size.x*source.y < size.y*source.x
-    { xy{x: size.x, y: source.y*size.x/source.x} } else
-    { xy{x: source.x*size.y/source.y, y: size.y} };
+    { xy{x: size.x/source.x*source.x, y: size.x/source.x*source.y} } else
+    { xy{x: size.y/source.y*source.x, y: size.y/source.y*source.y} };
     target.slice_mut((size-fit)/2, fit)
 }
 
-fn blit(target:&mut Image<&mut[bgra8]>, [b,g,r]: &[Image<&[u8]>; 3]) {
+fn blit(target:&mut Image<&mut[bgra8]>, source: &Image<&[u8]>) {
+    let size = target.size;
+    for y in 0..size.y {
+        for x in 0..size.x {
+            let v = source[(y*source.size.y/size.y*source.stride+x*source.size.x/size.x) as usize];
+            target[xy{x, y: size.y-1-y}] = bgra{b:v, g:v, r:v, a: 0xFF};
+        }
+    }
+}
+/*fn blit(target:&mut Image<&mut[bgra8]>, [b,g,r]: &[Image<&[u8]>; 3]) {
     let size = target.size;
     for y in 0..size.y {
         for x in 0..size.x {
@@ -57,7 +66,7 @@ fn blit(target:&mut Image<&mut[bgra8]>, [b,g,r]: &[Image<&[u8]>; 3]) {
             target[xy{x, y: size.y-1-y}] = bgra{b:b/2, g:g/2, r:r/2, a: 0xFF};
         }
     }
-}
+}*/
 
 impl Widget for View {
 #[throws] fn event(&mut self, _size: size, _event_context: &EventContext, event: &Event) -> bool {
@@ -90,14 +99,24 @@ fn paint(&mut self, target: &mut Target, _size: size) -> Result {
     let MinMax{min,max} = MinMax{min: floor(self.ortho[0].size, min), max: ceil(self.ortho[0].size, max)};
     let crop = |p:vec2| (p-(min+max)/2.)/(max-min);
     let ortho = {
-        let MinMax{min,max} = MinMax{min: from_normalized(self.ortho[0].size, min).map(|&c| c as u32), max: from_normalized(self.ortho[0].size, max).map(|&c| f32::ceil(c) as u32)};
-        self.ortho.each_ref().map(|c| c.slice(min, max-min))
+        let [b,g,r] = {
+            let MinMax{min,max} = MinMax{min: from_normalized(self.ortho[0].size, min).map(|&c| c as u32), max: from_normalized(self.ortho[0].size, max).map(|&c| f32::ceil(c) as u32)};
+            self.ortho.each_ref().map(|c| c.slice(min, max-min))
+        };
+
+        let mut target = Image::uninitialized(b.size);
+        for y in 0..target.size.y { for x in 0..target.size.x {
+            let p = xy{x,y};
+            target[p] = ((b[p] as u16+g[p] as u16+r[p] as u16)/3) as u8;
+        }}
+        target
     };
 
     //for (index, image) in self.oblique.iter().enumerate() { blit(fit(sub(index), image[0].size), index, image); }
     //blit(fit(sub(4), self.ortho[0].size), &self.ortho);
-    let mut target = fit(target, ortho[0].size);
-    blit(&mut target, &ortho);
+    let mut target = fit(target, ortho.size);
+    assert!(target.size.x*ortho.size.y == target.size.y*ortho.size.x);
+    blit(&mut target, &ortho.as_ref());
 
     let roof = {
         let (vertices, triangles) = building;
@@ -128,67 +147,69 @@ fn paint(&mut self, target: &mut Target, _size: size) -> Result {
     };
     assert!(roof.len() == 4);
     //println!("{roof:?}");
-    let mut disk = |point, r| {
+    for point in roof {
+        let point = point.xy();
+        let R = 16;
+        {
+            let xy{x,y} = from_normalized(target.size, crop(point)).map(|&c| c as u32);
+            let R = R*target.size.x/ortho.size.x;
+            for x in i32::max(0, x as i32-R as i32) as u32..u32::min(x+R+1, target.size.x) { let size = target.size; target[xy{x,y: size.y-1-y}] = bgra8{b:0,g:0,r:0xFF,a:0xFF}; }
+            for y in i32::max(0, y as i32-R as i32) as u32..u32::min(y+R+1, target.size.y) { let size = target.size; target[xy{x,y: size.y-1-y}] = bgra8{b:0,g:0,r:0xFF,a:0xFF}; }
+        }
+
         //if point < min || point > max { return; }
         struct Feature { p: uint2, min_ssd: u32 }
         let mut feature = Feature{p: xy{x:0, y:0}, min_ssd: 0};
-        let size = target.size;
         {
-            let p = from_normalized(target.size, crop(point)).map(|&c| c as i32);
-            let min = xy{x: i32::max(0, p.x - r as i32) as u32, y: i32::max(0, p.y - r as i32) as u32};
-            let max = xy{x: u32::min(p.x as u32+r+1, target.size.x), y: u32::min(p.y as u32+r+1, target.size.y)};
+            let size = ortho.size;
+            let p = from_normalized(size, crop(point)).map(|&c| c as i32);
+            const N : u8 = 5;
+            let min = xy{x: i32::max(1+N as i32, p.x - R as i32) as u32, y: i32::max(1+N as i32, p.y - R as i32) as u32};
+            let max = xy{x: u32::min(p.x as u32+R+1, size.x-N as u32-1), y: u32::min(p.y as u32+R+1, size.y-N as u32-1)};
             for y in min.y .. max.y {
                 for x in min.x .. max.x {
-                    let w2 = (r*r) as i32 - vector::sq(xy{x: x as i32,y: y as i32}-p);
+                    let w2 = (R*R) as i32 - vector::sq(xy{x: x as i32,y: y as i32}-p);
                     if w2 <= 0 { continue; }
                     let w2 = w2 as u32;
-                    target[xy{x,y: size.y-1-y}] = {
-                        let [b,g,r] = &ortho;
-                        let xy{x,y} = (from_normalized(b.size, crop(point)).map(|&c| c as i32) + xy{
-                            x: (x as i32 - p.x) * b.size.x as i32 / size.x as i32,
-                            y: (y as i32 - p.y) * b.size.y as i32 / size.y as i32
-                        }).map(|&c| c as u32);
-                        let index = y * b.stride + x;
-                        let g0 = g[index as usize];
-                        let mut min = u16::MAX;
-                        for [dx,dy] in [[-1,-1],[0,-1],[1,-1],[-1,0],[1,0],[-1,1],[0,1],[1,1]] {
-                            let g = g[(index as i32+dy*g.stride as i32 + dx) as usize];
-                            let ssd = num::sq(g as i16 - g0 as i16) as u16;
-                            if ssd < min { min = ssd; }
+                    let reference = (y-N as u32) * ortho.stride + x-N as u32;
+                    let mut min = u32::MAX;
+                    for [dx,dy] in [[-1,-1],[0,-1],[1,-1],[-1,0],[1,0],[-1,1],[0,1],[1,1]] {
+                        let candidate = (reference as i32 + dy*ortho.stride as i32 + dx) as u32;
+                        fn SSD<const N: u8>(image: &Image<&[u8]>, a: u32, b: u32) -> u32 {
+                            let mut SSD = 0;
+                            for y in 0..N {
+                                for x in 0..N {
+                                    let di = (y as u32)*image.stride + x as u32;
+                                    SSD += (image[(a+di) as usize] as u16 * image[(b+di) as usize] as u16) as u32;
+                                }
+                            }
+                            SSD
                         }
-                        let min = w2 * min as u32;
-                        if min > feature.min_ssd { feature = Feature{p: xy{x,y}, min_ssd: min}; }
-                        if false {
-                            let v = u32::min(min, 0xFF) as u8; //f32::sqrt(min as f32) as u8;
-                            bgra8{b:v,g:v,r:v,a:0xFF}
-                        } else {
-                            let b = b[index as usize];
-                            let g = g[index as usize];
-                            let r = r[index as usize];
-                            bgra8{b,g,r,a:0xFF}
-                        }
-                    };
+                        let ssd = SSD::<{N+1+N}>(&ortho.as_ref(), reference, candidate);
+                        if ssd < min { min = ssd; }
+                    }
+                    let min = /*(f32::sqrt(w2 as f32) as u32) **/ min as u32;
+                    if min > feature.min_ssd { feature = Feature{p: xy{x,y}, min_ssd: min}; }
                 }
             }
         }
         let Feature{p, ..} = feature;
-        let xy{x,y} = p*target.size/ortho[0].size;
-        for dx in -4..4+1 { target[xy{x: (x as i32+dx) as u32,y: size.y-1-y}] = bgra8{b:0,g:0,r:0xFF,a:0xFF}; }
-        for dy in -4..4+1 { target[xy{x,y: size.y-1-(y as i32+dy) as u32}] = bgra8{b:0,g:0,r:0xFF,a:0xFF}; }
-    };
-    if true { for point in roof { disk(point.xy(), 64); }}
+        let xy{x,y} = p*target.size/ortho.size;
+        for x in i32::max(0, x as i32-8) as u32..u32::min(x+8+1, target.size.x) { let size = target.size; target[xy{x,y: size.y-1-y}] = bgra8{b:0,g:0,r:0xFF,a:0xFF}; }
+        for y in i32::max(0, y as i32-8) as u32..u32::min(y+8+1, target.size.y) { let size = target.size; target[xy{x,y: size.y-1-y}] = bgra8{b:0,g:0,r:0xFF,a:0xFF}; }
+    }
 
     if false {
         let scale = vec2::from(target.size)/(max-min);
         let [x,y,z] = [&self.x, &self.y, &self.z];
         use rayon::prelude::*;
-        (&**x, &**y, &**z).into_par_iter().for_each(|(&x, &y, &z)| {
+        (&**x, &**y, &**z).into_par_iter().for_each(|(&x, &y, &_z)| {
             let p = (scale*(xy{x,y}-min)).map(|&c| c as u32);
             if p < target.size { unsafe{(target.as_ptr() as *mut bgra8).offset(((target.size.y-1-p.y)*target.stride+p.x) as isize).write(bgra8{b:0,g:0,r:0xFF,a:0xFF})}; }
         });
     }
 
-    if true { self.buildings.iter().for_each(|(vertices, triangles)| {
+    if false { self.buildings.iter().for_each(|(vertices, triangles)| {
         for triangle in triangles.iter() {
             let vertices = triangle.map(|i| vertices[i as usize]);
             let view = vertices.map(|point| from_normalized(target.size, crop(point.xy())));
