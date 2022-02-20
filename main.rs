@@ -1,17 +1,80 @@
-#![feature(type_alias_impl_trait, portable_simd, stdsimd, let_else, new_uninit, array_methods, array_windows)]
+#![feature(type_alias_impl_trait, portable_simd, stdsimd, let_else, new_uninit, array_methods, array_windows, once_cell)]
 #![allow(non_snake_case)]
 
 use {ui::{Error, Result}, fehler::throws};
 
 use owning_ref::OwningRef;
-
 type Array<T=f32> = OwningRef<Box<memmap::Mmap>, [T]>;
-
-#[throws] fn map<T:bytemuck::Pod>(field: &str, name: &str) -> Array<T> {
-    OwningRef::new(Box::new(unsafe{memmap::Mmap::map(&std::fs::File::open(format!("../.cache/las/{name}.{field}"))?)}?)).map(|data| bytemuck::cast_slice(&*data))
+#[throws] fn map<T:bytemuck::Pod>(path: &str) -> Array<T> {
+    OwningRef::new(Box::new(unsafe{memmap::Mmap::map(&std::fs::File::open(path)?)}?)).map(|data| bytemuck::cast_slice(&*data))
 }
 
+#[allow(non_camel_case_types)] type mat3 = [[f32; 3]; 3];
+    fn apply(M: mat3, v: vec2) -> vec2 { iter::eval(|i| v.x*M[i][0]+v.y*M[i][1]+M[i][2]).into() }
+
+    fn mul(a: mat3, b: mat3) -> mat3 { iter::eval(|i| iter::eval(|j| (0..3).map(|k| a[i][k]*b[k][j]).sum())) }
+    fn det(M: mat3) -> f32 {
+        let M = |i: usize, j: usize| M[i][j];
+        M(0,0) * (M(1,1) * M(2,2) - M(2,1) * M(1,2)) -
+        M(0,1) * (M(1,0) * M(2,2) - M(2,0) * M(1,2)) +
+        M(0,2) * (M(1,0) * M(2,1) - M(2,0) * M(1,1))
+    }
+    fn transpose(M: mat3) -> mat3 { iter::eval(|i| iter::eval(|j| M[j][i])) }
+    fn cofactor(M: mat3) -> mat3 { let M = |i: usize, j: usize| M[i][j]; [
+      [(M(1,1) * M(2,2) - M(2,1) * M(1,2)), -(M(1,0) * M(2,2) - M(2,0) * M(1,2)),   (M(1,0) * M(2,1) - M(2,0) * M(1,1))],
+     [-(M(0,1) * M(2,2) - M(2,1) * M(0,2)),   (M(0,0) * M(2,2) - M(2,0) * M(0,2)),  -(M(0,0) * M(2,1) - M(2,0) * M(0,1))],
+      [(M(0,1) * M(1,2) - M(1,1) * M(0,2)),  -(M(0,0) * M(1,2) - M(1,0) * M(0,2)),   (M(0,0) * M(1,1) - M(0,1) * M(1,0))],
+    ] }
+    fn adjugate(M: mat3) -> mat3 { transpose(cofactor(M)) }
+    fn scale(s: f32, M: mat3) -> mat3 { M.map(|row| row.map(|e| s*e)) }
+    fn inverse(M: mat3) -> mat3 { scale(1./det(M), adjugate(M)) }
+
 use image::{Image, bgra, bgra8};
+
+use std::lazy::SyncLazy;
+#[allow(non_upper_case_globals)] const sRGB_reverse : SyncLazy<[f32; 256]> = SyncLazy::new(|| iter::eval(|i| {
+    let linear = i as f32 / 255.;
+    if linear > 0.04045 { f32::powf((linear+0.055)/1.055, 2.4) } else { linear / 12.92 }
+}));
+
+fn sRGB_to_linear([b,g,r]: &[Image<&[u8]>; 3]) -> Image<Box<[u8]>> {
+    let size = b.size;
+    let mut target = Image::uninitialized(size);
+    {
+        let stride = b.stride;
+        assert!(stride%16 == 0 && size.x%16==0 && target.stride == size.x);
+        use std::arch::x86_64::*;
+        use rayon::prelude::*;
+        (0..size.y).into_par_iter().for_each(|y| unsafe {
+            let lookup = sRGB_reverse.as_ptr();
+            let target : *const u8 = target.as_ptr();
+            let [b,g,r] = [b,g,r].map(|plane| plane.data.as_ptr());
+            let target_row = target.offset((y*size.x) as isize);
+            let [b,g,r] = [b,g,r].map(|plane| plane.offset((y*stride) as isize));
+            let [B,G,R] = [_mm512_set1_ps(255.*0.0722),_mm512_set1_ps(255.*0.7152),_mm512_set1_ps(255.*0.2126)];
+            for x in (0..size.x).step_by(16) {
+                _mm_store_si128(target_row.offset(x as isize) as *mut __m128i,
+                _mm512_cvtepi32_epi8(
+                    _mm512_cvtps_epu32(
+                    _mm512_add_ps(
+                    _mm512_mul_ps(B,
+                        _mm512_i32gather_ps(
+                            _mm512_cvtepu8_epi32(
+                                _mm_load_si128(b.offset(x as isize) as *const __m128i)), lookup as *const u8, 4)),
+                                _mm512_add_ps(
+                                    _mm512_mul_ps(G,
+                                        _mm512_i32gather_ps(
+                                            _mm512_cvtepu8_epi32(
+                                                _mm_load_si128(g.offset(x as isize) as *const __m128i)), lookup as *const u8, 4)),
+                                    _mm512_mul_ps(R,
+                                        _mm512_i32gather_ps(
+                                            _mm512_cvtepu8_epi32(
+                                                _mm_load_si128(r.offset(x as isize) as *const __m128i)), lookup as *const u8, 4)))))));
+            }
+        });
+    }
+    target
+}
 
 type Mesh = (Box<[vec3]>, Box<[[u16; 3]]>);
 struct View {
@@ -28,7 +91,8 @@ struct View {
     vertical_scroll: f32,
 }
 
-use vector::{xy, uint2, int2, size, vec2, xyz, vec3, dot, cross, norm, minmax, MinMax, normalize, num::IsZero};
+use vector::{xy, uint2, size, vec2, xyz, vec3, cross, norm, minmax, MinMax};
+//use vector::{xy, uint2, int2, size, vec2, xyz, vec3, dot, cross, norm, minmax, MinMax, normalize, num::IsZero};
 use ui::{Widget, RenderContext as Target, widget::{EventContext, Event}};
 
 //fn rotate(xy{x,y,..}: vec2, angle: f32) -> vec2 { xy{x: f32::cos(angle)*x+f32::sin(angle)*y, y: f32::cos(angle)*y-f32::sin(angle)*x} }
@@ -56,7 +120,7 @@ fn fit_image<'m, T>(target: &'m mut Image<&mut[T]>, source: size) -> Image<&'m m
     target.slice_mut(offset, size)
 }
 
-fn blitG(target:&mut Image<&mut[bgra8]>, source: &Image<&[u8]>) {
+fn blit(target:&mut Image<&mut[bgra8]>, source: &Image<&[u8]>) {
     let size = target.size;
     for y in 0..size.y {
         for x in 0..size.x {
@@ -66,12 +130,46 @@ fn blitG(target:&mut Image<&mut[bgra8]>, source: &Image<&[u8]>) {
         }
     }
 }
-fn blit(target:&mut Image<&mut[bgra8]>, [b,g,r]: &[Image<&[u8]>; 3]) {
+fn blit_sRGB(target:&mut Image<&mut[bgra8]>, [b,g,r]: &[Image<&[u8]>; 3]) {
     let size = target.size;
     for y in 0..size.y {
         for x in 0..size.x {
-            let i = (y*b.size.y/size.y*b.stride+x*b.size.x/size.x) as usize;
-            let [b,g,r] = [b.data[i],g.data[i],r.data[i]];
+            let [b,g,r] = {
+                let xy{x,y} = ((size/2*b.size).signed()+(xy{x,y}.signed()-size.signed()/2)*b.size.signed()/5).unsigned();
+                let i = (y/size.y*b.stride+x/size.x) as usize;
+                [b.data[i],g.data[i],r.data[i]]
+            };
+            target[xy{x, y: size.y-1-y}] = bgra{b, g, r, a: 0xFF};
+        }
+    }
+}
+
+fn affine_blit(target:&mut Image<&mut[bgra8]>, source: Image<&[u8]>, A: mat3) {
+    let size = target.size;
+    for y in 0..size.y {
+        for x in 0..size.x {
+            let v = {
+                let p = {let size=vec2::from(size); size/2.+(vec2::from(xy{x,y})-size/2.)/5.};
+                let p = apply(A, p).map(|&c| c as u32);
+                if p.x >= source.size.x || p.y >= source.size.y { continue; }
+                image::sRGB(&(source[p] as f32/255.))
+            };
+            target[xy{x, y: size.y-1-y}] = bgra{b: v, g: v, r: v, a: 0xFF};
+        }
+    }
+}
+
+fn affine_blit_sRGB(target:&mut Image<&mut[bgra8]>, [b,g,r]: &[Image<&[u8]>; 3], A: mat3) {
+    let size = target.size;
+    for y in 0..size.y {
+        for x in 0..size.x {
+            let [b,g,r] = {
+                let p = {let size=vec2::from(size); size/2.+(vec2::from(xy{x,y})-size/2.)/5.};
+                let xy{x,y} = apply(A, p).map(|&c| c as u32);
+                if x >= b.size.x || y >= b.size.y { continue; }
+                let i = (y*b.stride+x) as usize;
+                [b.data[i],g.data[i],r.data[i]]
+            };
             target[xy{x, y: size.y-1-y}] = bgra{b, g, r, a: 0xFF};
         }
     }
@@ -92,7 +190,7 @@ impl Widget for View {
         &Event::Button{position, state: ui::widget::ButtonState::Pressed, ..} => {
             let position = position.map(|&c| c as u32);
             let f = |index: usize, (offset, size): (uint2, size), source: size| if position > offset && position < offset+size {
-                let xy{x,y} = (position-offset);
+                let xy{x,y} = position-offset;
                 let y = size.y-1-y;
                 let xy{x,y} = xy{x,y}*source/size;
                 println!("{index} {x} {y}");
@@ -106,28 +204,12 @@ impl Widget for View {
 }
 
 fn paint(&mut self, target: &mut Target, _size: size) -> Result {
+    let start = std::time::Instant::now();
+    let oblique = self.oblique.each_ref().map(|image| sRGB_to_linear(&image.each_ref().map(|image| image.as_ref())));
+    println!("{:?}", std::time::Instant::now().duration_since(start));
+
     //for (index, image) in self.oblique.iter().enumerate() { blit(&mut fit_image(&mut sub_image(target, index), image[0].size), &image.each_ref().map(|image| image.as_ref())); }
-    blit(&mut fit_image(&mut sub_image(target, 4), self.ortho[0].size), &self.ortho.each_ref().map(|image| image.as_ref()));
-
-    type mat3 = [[f32; 3]; 3];
-    fn apply(M: mat3, v: vec2) -> vec2 { iter::eval(|i| v.x*M[i][0]+v.y*M[i][1]+M[i][2]).into() }
-
-    fn mul(a: mat3, b: mat3) -> mat3 { iter::eval(|i| iter::eval(|j| (0..3).map(|k| a[i][k]*b[k][j]).sum())) }
-    fn det(M: mat3) -> f32 {
-        let M = |i: usize, j: usize| M[i][j];
-        M(0,0) * (M(1,1) * M(2,2) - M(2,1) * M(1,2)) -
-        M(0,1) * (M(1,0) * M(2,2) - M(2,0) * M(1,2)) +
-        M(0,2) * (M(1,0) * M(2,1) - M(2,0) * M(1,1))
-    }
-    fn transpose(M: mat3) -> mat3 { iter::eval(|i| iter::eval(|j| M[j][i])) }
-    fn cofactor(M: mat3) -> mat3 { let M = |i: usize, j: usize| M[i][j]; [
-      [(M(1,1) * M(2,2) - M(2,1) * M(1,2)), -(M(1,0) * M(2,2) - M(2,0) * M(1,2)),   (M(1,0) * M(2,1) - M(2,0) * M(1,1))],
-     [-(M(0,1) * M(2,2) - M(2,1) * M(0,2)),   (M(0,0) * M(2,2) - M(2,0) * M(0,2)),  -(M(0,0) * M(2,1) - M(2,0) * M(0,1))],
-      [(M(0,1) * M(1,2) - M(1,1) * M(0,2)),  -(M(0,0) * M(1,2) - M(1,0) * M(0,2)),   (M(0,0) * M(1,1) - M(0,1) * M(1,0))],
-    ] }
-    fn adjugate(M: mat3) -> mat3 { transpose(cofactor(M)) }
-    fn scale(s: f32, M: mat3) -> mat3 { M.map(|row| row.map(|e| s*e)) }
-    fn inverse(M: mat3) -> mat3 { scale(1./det(M), adjugate(M)) }
+    blit_sRGB(&mut fit_image(&mut sub_image(target, 4), self.ortho[0].size), &self.ortho.each_ref().map(|image| image.as_ref()));
 
     let points : [[uint2; 5]; 3] = iter::eval(|point| (&*std::str::from_utf8(&std::fs::read(format!("../data/{point}")).unwrap()).unwrap().lines().map(|line| {
         let [x, y] : [u32;2] = (&*line.split(' ').map(|c| str::parse(c).unwrap()).collect::<Box<_>>()).try_into().unwrap();
@@ -138,7 +220,7 @@ fn paint(&mut self, target: &mut Target, _size: size) -> Result {
     let (_, size) = fit(sub(target.size, 0), self.ortho[0].size);
     let X : [vec2; 3] = points.map(|p| p[4].map(|&c| c as f32)*vec2::from(size)/vec2::from(self.ortho[0].size));
 
-    for (index, image) in self.oblique.iter().enumerate() {
+    for (index, image) in oblique.iter().enumerate() {
         let Y : [uint2; 3] = points.map(|p| p[index]);
         let A = {
             let X = [
@@ -154,36 +236,17 @@ fn paint(&mut self, target: &mut Target, _size: size) -> Result {
             mul(Y, inverse(X))
         };
         for (x, y) in std::iter::zip(X, Y) {
-            println!("{x:?} {y:?}");
+            //println!("{x:?} {y:?}");
             assert!(norm(apply(A, vec2::from(x)) - vec2::from(y))<1.);
         }
-        affine_blit(&mut fit_image(&mut sub_image(target, index), self.ortho[0].size), &image.each_ref().map(|image| image.as_ref()), A);
-        fn affine_blit(target:&mut Image<&mut[bgra8]>, [b,g,r]: &[Image<&[u8]>; 3], A: mat3) {
-            let size = target.size;
-            println!("{size:?} {:?}", b.size);
-            for y in 0..size.y {
-                for x in 0..size.x {
-                    let [b,g,r] = {
-                        let xy{x,y} = apply(A, xy{x: x as f32,y: y as f32}).map(|&c| c as u32);
-                        if x >= b.size.x || y >= b.size.y { continue; }
-                        let i = (y*b.stride+x) as usize;
-                        [b.data[i],g.data[i],r.data[i]]
-                    };
-                    target[xy{x, y: size.y-1-y}] = bgra{b, g, r, a: 0xFF};
-                }
-            }
-        }
+        //affine_blit_sRGB(&mut fit_image(&mut sub_image(target, index), self.ortho[0].size), &image.each_ref().map(|image| image.as_ref()), A);
+        affine_blit(&mut fit_image(&mut sub_image(target, index), self.ortho[0].size), image.as_ref(), A);
     }
 
-/*
-    let ord = |x:f32| -> ordered_float::NotNan<f32> { ordered_float::NotNan::new(x).unwrap() };
-    use image::sRGB;
-    fn sRGB_reverse(index: u8) -> f32 {
-        let sRGB = index as f32 / 255.;
-        if sRGB > 0.04045 { f32::powf((sRGB+0.055)/1.055, 2.4) } else { sRGB / 12.92 }
-    }
+    //let ord = |x:f32| -> ordered_float::NotNan<f32> { ordered_float::NotNan::new(x).unwrap() };
+    //use image::sRGB;
     fn from_normalized(size: size, xy{x,y,..}: vec2) -> vec2 { let size = vec2::from(size); size/2. + size * xy{x,y}}
-    fn to_normalized(size: size, xy{x,y,..}: vec2) -> vec2 { let size = vec2::from(size); (xy{x,y} - size/2.) / size }
+    /*fn to_normalized(size: size, xy{x,y,..}: vec2) -> vec2 { let size = vec2::from(size); (xy{x,y} - size/2.) / size }
     fn floor(size: size, p: vec2) -> vec2 { to_normalized(size, from_normalized(size, p).map(|&c| f32::floor(c))) }
     fn ceil(size: size, p: vec2) -> vec2 { to_normalized(size, from_normalized(size, p).map(|&c| f32::ceil(c))) }
 
@@ -198,14 +261,7 @@ fn paint(&mut self, target: &mut Target, _size: size) -> Result {
         let MinMax{min,max} = MinMax{min: from_normalized(self.ortho[0].size, min).map(|&c| c as u32), max: from_normalized(self.ortho[0].size, max).map(|&c| f32::ceil(c) as u32)};
         self.ortho.each_ref().map(|c| c.slice(min, max-min))
     };
-    let ortho = {
-        let mut target = Image::uninitialized(b.size);
-        for y in 0..target.size.y { for x in 0..target.size.x {
-            let p = xy{x,y};
-            target[p] = ((0.0722*sRGB_reverse(b[p])+0.7152*sRGB_reverse(g[p])+0.2126*sRGB_reverse(r[p]))*255./3.) as u8;
-        }}
-        target
-    };
+    let ortho = gray;
 
     let mut target = fit(target, ortho.size);
     assert!(target.size.x*ortho.size.y == target.size.y*ortho.size.x);
@@ -336,12 +392,12 @@ fn paint(&mut self, target: &mut Target, _size: size) -> Result {
             let p = (scale*(xy{x,y}-min)).map(|&c| c as u32);
             if p < target.size { unsafe{(target.as_ptr() as *mut bgra8).offset(((target.size.y-1-p.y)*target.stride+p.x) as isize).write(bgra8{b:0,g:0,r:0xFF,a:0xFF})}; }
         });
-    }
+    }*/
 
-    if false { self.buildings.iter().for_each(|(vertices, triangles)| {
+    let render = |target:&mut Image<&mut[bgra8]>| self.buildings.iter().for_each(|(vertices, triangles)| {
         for triangle in triangles.iter() {
             let vertices = triangle.map(|i| vertices[i as usize]);
-            let view = vertices.map(|point| from_normalized(target.size, crop(point.xy())));
+            let view = vertices.map(|point| from_normalized(target.size, 5.*point.xy()));
             let [v0,v1,v2] = view;
             let w = cross(v1-v0, v2-v0);
             //println!("{v0:?} {v1:?} {v2:?} {w}");
@@ -362,8 +418,6 @@ fn paint(&mut self, target: &mut Target, _size: size) -> Result {
                             let v = ((y+1./2.)*(b.size.y as f32)) as u32;
                             let index = v * b.stride + u;
                             let b = b[index as usize];
-                            //let g = image::sRGB(&y);
-                            //let r = image::sRGB(&x);
                             let g = g[index as usize];
                             let r = r[index as usize];
                             bgra8{b,g,r,a:0xFF}
@@ -372,7 +426,11 @@ fn paint(&mut self, target: &mut Target, _size: size) -> Result {
                 }
             }
         }
-    });}*/
+    });
+
+    if false { for index in 0..4 {
+        render(&mut fit_image(&mut sub_image(target, index), self.ortho[0].size));
+    } }
 
     //target.fill(bgra8{b:0,g:0,r:0,a:0xFF});
     /*let transform = |p:vec3| {
@@ -524,6 +582,8 @@ fn new(image: &str, points: &str) -> Result<Self> {
     let extent = max-min;
     let extent = extent.x.min(extent.y);
 
+    fn map<T:bytemuck::Pod>(field: &str, name: &str) -> Result<Array<T>> { self::map(&format!("../.cache/las/{name}.{field}")) }
+
 	/*let ground = {
 		let name = "swissalti3d_2020_2684-1248_0.5_2056_5728";
 		let tiff = unsafe{memmap::Mmap::map(&std::fs::File::open(format!("../data/{name}.tif"))?)?};
@@ -603,6 +663,7 @@ fn new(image: &str, points: &str) -> Result<Self> {
     /*let buildings = dxf::Drawing::load_file("../data/SWISSBUILDINGS3D_2_0_CHLV95LN02_1091-23.dxf")?.entities();
     std::fs::write("../.cache/las/1091-23.buildings", bincode::serialize(&buildings.collect::<Vec<_>>())?)?;*/
     let buildings : Vec<dxf::entities::Entity> = bincode::deserialize(&std::fs::read("../.cache/las/1091-23.buildings")?)?;
+    let start = std::time::Instant::now();
     let buildings = buildings.into_iter().filter_map(|mesh| if let dxf::entities::EntityType::Polyline(mesh) = mesh.specific {
         let mut vertices_and_indices = mesh.__vertices_and_handles.iter().peekable();
         let mut vertices = Vec::new();
@@ -624,6 +685,7 @@ fn new(image: &str, points: &str) -> Result<Self> {
         }).collect::<Box<_>>();
         Some((vertices.into_boxed_slice(),triangles))
     } else { None }).collect::<Box<_>>();
+    println!("{:?}", std::time::Instant::now().duration_since(start));
     //println!("{} {}", buildings.iter().map(|(v,t)| v.len()*4+t.len()*3*2).sum::<usize>(), buildings.iter().map(|(_,t)| t.len()*3*4).sum::<usize>());
 
     let oblique = iter::eval(|index| {
