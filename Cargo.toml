@@ -2,6 +2,7 @@ package={name='view', version='0.0.0', edition='2021', default-run='main'}
 bin=[{name='main', path='main.rs'}]
 
 [dependencies]
+itertools= "*"
 fehler='*'
 iter={git='https://github.com/Matthias-Fauconneau/iter'}
 ordered-float= "*"
@@ -22,10 +23,6 @@ png = "*"
 [patch.crates-io]
 ash-window={git='https://github.com/Matthias-Fauconneau/ash'}
 ash={git='https://github.com/Matthias-Fauconneau/ash'}
-#tiff={path='../image-tiff'}
-#jpeg-decoder={path="../jpeg-decoder"}
-[patch.'https://github.com/Matthias-Fauconneau/vector']
-vector={path='../vector'}
 
 [profile.dev]
 opt-level = 3

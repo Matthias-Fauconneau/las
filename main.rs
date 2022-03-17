@@ -1,6 +1,5 @@
 #![feature(type_alias_impl_trait, portable_simd, stdsimd, let_else, new_uninit, array_methods, array_windows, once_cell)]
-#![allow(non_snake_case)]
-
+#![allow(non_snake_case, non_upper_case_globals, dead_code)]
 use {ui::{Error, Result}, fehler::throws};
 
 use owning_ref::OwningRef;
@@ -9,76 +8,15 @@ type Array<T=f32> = OwningRef<Box<memmap::Mmap>, [T]>;
     OwningRef::new(Box::new(unsafe{memmap::Mmap::map(&std::fs::File::open(path)?)}?)).map(|data| bytemuck::cast_slice(&*data))
 }
 
-#[allow(non_camel_case_types)] type mat3 = [[f32; 3]; 3];
-    fn apply(M: mat3, v: vec2) -> vec2 { iter::eval(|i| v.x*M[i][0]+v.y*M[i][1]+M[i][2]).into() }
-
-    fn mul(a: mat3, b: mat3) -> mat3 { iter::eval(|i| iter::eval(|j| (0..3).map(|k| a[i][k]*b[k][j]).sum())) }
-    fn det(M: mat3) -> f32 {
-        let M = |i: usize, j: usize| M[i][j];
-        M(0,0) * (M(1,1) * M(2,2) - M(2,1) * M(1,2)) -
-        M(0,1) * (M(1,0) * M(2,2) - M(2,0) * M(1,2)) +
-        M(0,2) * (M(1,0) * M(2,1) - M(2,0) * M(1,1))
-    }
-    fn transpose(M: mat3) -> mat3 { iter::eval(|i| iter::eval(|j| M[j][i])) }
-    fn cofactor(M: mat3) -> mat3 { let M = |i: usize, j: usize| M[i][j]; [
-      [(M(1,1) * M(2,2) - M(2,1) * M(1,2)), -(M(1,0) * M(2,2) - M(2,0) * M(1,2)),   (M(1,0) * M(2,1) - M(2,0) * M(1,1))],
-     [-(M(0,1) * M(2,2) - M(2,1) * M(0,2)),   (M(0,0) * M(2,2) - M(2,0) * M(0,2)),  -(M(0,0) * M(2,1) - M(2,0) * M(0,1))],
-      [(M(0,1) * M(1,2) - M(1,1) * M(0,2)),  -(M(0,0) * M(1,2) - M(1,0) * M(0,2)),   (M(0,0) * M(1,1) - M(0,1) * M(1,0))],
-    ] }
-    fn adjugate(M: mat3) -> mat3 { transpose(cofactor(M)) }
-    fn scale(s: f32, M: mat3) -> mat3 { M.map(|row| row.map(|e| s*e)) }
-    fn inverse(M: mat3) -> mat3 { scale(1./det(M), adjugate(M)) }
-
-use image::{Image, bgra, bgra8};
-
-use std::lazy::SyncLazy;
-#[allow(non_upper_case_globals)] const sRGB_reverse : SyncLazy<[f32; 256]> = SyncLazy::new(|| iter::eval(|i| {
-    let linear = i as f32 / 255.;
-    if linear > 0.04045 { f32::powf((linear+0.055)/1.055, 2.4) } else { linear / 12.92 }
-}));
-
-fn sRGB_to_linear([b,g,r]: &[Image<&[u8]>; 3]) -> Image<Box<[u8]>> {
-    let size = b.size;
-    let mut target = Image::uninitialized(size);
-    {
-        let stride = b.stride;
-        assert!(stride%16 == 0 && size.x%16==0 && target.stride == size.x);
-        use std::arch::x86_64::*;
-        use rayon::prelude::*;
-        (0..size.y).into_par_iter().for_each(|y| unsafe {
-            let lookup = sRGB_reverse.as_ptr();
-            let target : *const u8 = target.as_ptr();
-            let [b,g,r] = [b,g,r].map(|plane| plane.data.as_ptr());
-            let target_row = target.offset((y*size.x) as isize);
-            let [b,g,r] = [b,g,r].map(|plane| plane.offset((y*stride) as isize));
-            let [B,G,R] = [_mm512_set1_ps(255.*0.0722),_mm512_set1_ps(255.*0.7152),_mm512_set1_ps(255.*0.2126)];
-            for x in (0..size.x).step_by(16) {
-                _mm_store_si128(target_row.offset(x as isize) as *mut __m128i,
-                _mm512_cvtepi32_epi8(
-                    _mm512_cvtps_epu32(
-                    _mm512_add_ps(
-                    _mm512_mul_ps(B,
-                        _mm512_i32gather_ps(
-                            _mm512_cvtepu8_epi32(
-                                _mm_load_si128(b.offset(x as isize) as *const __m128i)), lookup as *const u8, 4)),
-                                _mm512_add_ps(
-                                    _mm512_mul_ps(G,
-                                        _mm512_i32gather_ps(
-                                            _mm512_cvtepu8_epi32(
-                                                _mm_load_si128(g.offset(x as isize) as *const __m128i)), lookup as *const u8, 4)),
-                                    _mm512_mul_ps(R,
-                                        _mm512_i32gather_ps(
-                                            _mm512_cvtepu8_epi32(
-                                                _mm_load_si128(r.offset(x as isize) as *const __m128i)), lookup as *const u8, 4)))))));
-            }
-        });
-    }
-    target
-}
+mod matrix; use matrix::*;
+mod image; use crate::image::*;
+mod layout; use layout::*;
+use vector::{xy, uint2, size, int2, vec2};
 
 type Mesh = (Box<[vec3]>, Box<[[u16; 3]]>);
 struct View {
-    oblique: [[Image<Array<u8>>; 3]; 4],
+    //oblique: [[Image<Array<u8>>; 3]; 4],
+    oblique: [Image<Array<u8>>; 4],
 	//ground: Image<Array<f32>>,
     ortho: [Image<Array<u8>>; 3],
     buildings: Box<[Mesh]>,
@@ -91,89 +29,246 @@ struct View {
     vertical_scroll: f32,
 }
 
-use vector::{xy, uint2, size, vec2, xyz, vec3, cross, norm, minmax, MinMax};
-//use vector::{xy, uint2, int2, size, vec2, xyz, vec3, dot, cross, norm, minmax, MinMax, normalize, num::IsZero};
+#[throws] fn size(name: &str) -> size {
+    let tiff = unsafe{memmap::Mmap::map(&std::fs::File::open(format!("../data/{name}.tif"))?)?};
+    let mut tiff = tiff::decoder::Decoder::new(std::io::Cursor::new(&*tiff))?;
+    let (size_x, size_y) = tiff.dimensions()?;
+    size{x: size_x, y: size_y}
+}
+
+type Bounds = MinMax<vec3>;
+
+#[throws] fn raster_bounds(name: &str) -> Bounds {
+    let size = size(name)?;
+    let tiff = unsafe{memmap::Mmap::map(&std::fs::File::open(format!("../data/{name}.tif"))?)?};
+    let mut tiff = tiff::decoder::Decoder::new(std::io::Cursor::new(&*tiff))?;
+    let [_, _, _, E, N, _] = tiff.get_tag_f64_vec(tiff::tags::Tag::ModelTiepointTag)?[..] else { panic!() };
+    let [scale_E, scale_N, _] = tiff.get_tag_f64_vec(tiff::tags::Tag::ModelPixelScaleTag)?[..] else { panic!() };
+    let min = vec3{x: E as f32, y: (N-scale_N*size.y as f64) as f32, z: 0.};
+    let max = vec3{x: (E+scale_E*size.x as f64) as f32, y: N as f32, z: f32::MAX};
+    MinMax{min, max}
+}
+
+#[throws] fn points_bounds(name: &str) -> Bounds {
+    let reader = las::Reader::from_path(format!("../data/{name}.las"))?;
+    let las::Bounds{min, max} = las::Read::header(&reader).bounds();
+    MinMax{min: vec3{x: min.x as f32, y: min.y as f32, z: min.z as f32}, max: vec3{x: max.x as f32, y: max.y as f32, z: max.z as f32}}
+}
+
+const neighbours: [int2; 8] = [xy{x:-1,y:-1},xy{x:0,y:-1},xy{x:1,y:-1}, xy{x:-1,y:0},xy{x:1,y:0}, xy{x:-1,y:1},xy{x:0,y:1},xy{x:1,y:1}];
+
+impl View {
+fn new(image: &str, points: &str) -> Result<Self> {
+    let image_bounds = raster_bounds(image)?;
+    let MinMax{min, max} = image_bounds.clip(points_bounds(points)?);
+    //println!("{min:?} {max:?}");
+    let center = (1./2.)*(min+max);
+    let extent = max-min;
+    let extent = extent.x.min(extent.y);
+
+    fn map<T:bytemuck::Pod>(field: &str, name: &str) -> Result<Array<T>> { self::map(&format!("../.cache/las/{name}.{field}")) }
+
+	/*let ground = {
+		let name = "swissalti3d_2020_2684-1248_0.5_2056_5728";
+		let tiff = unsafe{memmap::Mmap::map(&std::fs::File::open(format!("../data/{name}.tif"))?)?};
+		let mut tiff = tiff::decoder::Decoder::new(std::io::Cursor::new(&*tiff))?;
+		let tiff::decoder::DecodingResult::F32(ground) = tiff.read_image()? else { panic!() };
+	    let size = size(name)?;
+        let stride = size.x;
+        let ground = { // Flip Y and normalizes height
+            let mut target = unsafe{Box::new_uninit_slice(ground.len()).assume_init()};
+            for y in 0..size.y {
+                for x in 0..size.x {
+                    target[(y*stride+x) as usize] = (ground[((size.y-1-y)*stride+x) as usize]-center.z)/extent;
+                }
+            }
+            target
+        };
+        std::fs::write(format!("../.cache/las/{points}.ground"), bytemuck::cast_slice(&ground))?;
+
+		let bounds = raster_bounds(name)?;
+        let scale = size.x as f32 / (bounds.max - bounds.min).x;
+        assert!(scale == 2., "{scale}");
+        let min = scale*(min-bounds.min);
+        assert_eq!(min.x, f32::trunc(min.x));
+        assert_eq!(min.y, f32::trunc(min.y));
+        let max = scale*(max-bounds.min);
+        let size = xy{x: max.x as u32 - min.x as u32, y: max.y as u32 - min.y as u32};
+        let ground = map("ground", points).unwrap();
+        Image::strided(size, ground.map(|data| &data[((min.y as u32)*stride+(min.x as u32)) as usize..][..(size.y*stride) as usize]), stride)
+    };*/
+
+    let [r,g,b] = {
+        let size = size(image)?;
+        let scale = size.x as f32 / (image_bounds.max - image_bounds.min).x;
+        assert!(scale == 20.);
+        let min = scale*(min-image_bounds.min);
+        assert_eq!(min.x, f32::trunc(min.x));
+        assert_eq!(min.y, f32::trunc(min.y));
+        let max = scale*(max-image_bounds.min);
+
+        /*let tiff = unsafe{memmap::Mmap::map(&std::fs::File::open(format!("../data/{image}.tif"))?)?};
+        let mut tiff = tiff::decoder::Decoder::new(std::io::Cursor::new(&*tiff))?.with_limits(tiff::decoder::Limits::unlimited());
+        let tiff::decoder::DecodingResult::U8(mut rgba) = tiff.read_image()? else { panic!() };
+        println!("OK");
+        for i in 0..rgba.len()/4 {
+            let i = i*4;
+            rgba[i+0] = rgba[i+2]; // B
+            rgba[i+1] = rgba[i+1]; // G
+            rgba[i+2] = rgba[i+0]; // R
+            rgba[i+3] = rgba[i+3]; // A
+        }
+        let bgra = rgba;*/
+
+        let stride = size.x;
+        let plane_stride = (size.y*stride) as usize;
+
+        /*let flip = {
+            let image = map("bil", image).unwrap();
+            let mut flip = unsafe{Box::new_uninit_slice(image.len()).assume_init()};
+            for i in 0..3 {
+                for y in 0..size.y {
+                    for x in 0..size.x {
+                        flip[i*plane_stride+(y*stride+x) as usize] = image[i*plane_stride+((size.y-1-y)*stride+x) as usize];
+                    }
+                }
+            }
+            flip
+        };
+        std::fs::write(format!("../.cache/las/{image}.rgb"), flip)?;*/
+
+        let size = xy{x: max.x as u32 - min.x as u32, y: max.y as u32 - min.y as u32};
+        iter::eval(|plane| {
+            let image = map("rgb", image).unwrap();
+            Image::strided(size, image.map(|data| &data[plane*plane_stride + ((min.y as u32)*stride+(min.x as u32)) as usize..][..(size.y*stride) as usize]), stride)
+        })
+    };
+
+    /*let buildings = dxf::Drawing::load_file("../data/SWISSBUILDINGS3D_2_0_CHLV95LN02_1091-23.dxf")?.entities();
+    std::fs::write("../.cache/las/1091-23.buildings", bincode::serialize(&buildings.collect::<Vec<_>>())?)?;*/
+    let buildings : Vec<dxf::entities::Entity> = bincode::deserialize(&std::fs::read("../.cache/las/1091-23.buildings")?)?;
+    let buildings = buildings.into_iter().filter_map(|mesh| if let dxf::entities::EntityType::Polyline(mesh) = mesh.specific {
+        let mut vertices_and_indices = mesh.__vertices_and_handles.iter().peekable();
+        let mut vertices = Vec::new();
+        while let Some((vertex,_)) = vertices_and_indices.next_if(|(v,_)|
+            [v.polyface_mesh_vertex_index1, v.polyface_mesh_vertex_index2, v.polyface_mesh_vertex_index3, v.polyface_mesh_vertex_index4] == [0,0,0,0]
+        ) {
+            let dxf::Point{x,y,z} = vertex.location;
+            let v = (vec3{x: x as f32,y: y as f32, z: z as f32}-center)/extent;
+            if !(v.x > -1./2. && v.x < 1./2. && v.y > -1./2. && v.y < 1./2.) { return None; }
+            vertices.push(v);
+        }
+        let triangles = vertices_and_indices.map(|(v,_)| {
+            let face = [v.polyface_mesh_vertex_index1, v.polyface_mesh_vertex_index2, v.polyface_mesh_vertex_index3, v.polyface_mesh_vertex_index4];
+            assert!(face[3] == 0);
+            let face : [i32; 3] = face[..3].try_into().unwrap();
+            let face : [u16; 3] = face.map(|i| (i-1).try_into().unwrap());
+            for i in face { assert!((i as usize) < vertices.len(), "{face:?} {}", vertices.len()); }
+            face
+        }).collect::<Box<_>>();
+        Some((vertices.into_boxed_slice(),triangles))
+    } else { None }).collect::<Box<_>>();
+    //println!("{} {}", buildings.iter().map(|(v,t)| v.len()*4+t.len()*3*2).sum::<usize>(), buildings.iter().map(|(_,t)| t.len()*3*4).sum::<usize>());
+
+    let oblique = iter::eval(|index| {
+        let orientation = index*90;
+        let decoder = png::Decoder::new(std::fs::File::open(format!("../data/47.38380,8.55692,{orientation}.png")).unwrap());
+        let mut reader = decoder.read_info().unwrap();
+        let size = xy{x:reader.info().width, y:reader.info().height};
+        let stride = size.x;
+        let plane_stride = (size.y*stride) as usize;
+        if false {
+            //println!("{orientation}");
+            let mut buffer = vec![0; reader.output_buffer_size()];
+            let info = reader.next_frame(&mut buffer).unwrap();
+            let image = &buffer[..info.buffer_size()];
+            let mut planar = unsafe{Box::new_uninit_slice(image.len()).assume_init()};
+            for i in 0..3 {
+                for y in 0..size.y {
+                    for x in 0..size.x {
+                        planar[i*plane_stride+(y*stride+x) as usize] = image[(y*stride+x) as usize * 3 + i];
+                    }
+                }
+            }
+            std::fs::write(format!("../.cache/las/{orientation}.rgb"), planar).unwrap();
+        }
+        if false {
+            let [r,g,b] = iter::eval(|plane| Image::new(size, map("rgb", &format!("{orientation}")).unwrap().map(|data:&[u8]| &data[plane*plane_stride..][..plane_stride])));
+            std::fs::write(format!("../.cache/las/{orientation}.L"), &sRGB_to_linear(&([b,g,r].each_ref().map(|image| image.as_ref()))).data).unwrap();
+        }
+        if false {
+            let L = Image::<Array<u8>>::new(size, map("L", &format!("{orientation}")).unwrap());
+            let size = L.size;
+            let mut target = Image::zero(size);
+            for y in 1..size.y-1 { for x in 1..size.x-1 {
+                let p = xy{x,y}.signed();
+                let Lx = (-1.) * L[(p+xy{x:-1,y:-1}).unsigned()] as f32 + (-2.) * L[(p+xy{x:-1,y:0}).unsigned()] as f32 + (-1.) * L[(p+xy{x:-1,y:1}).unsigned()] as f32 +
+                            (1.) * L[(p+xy{x:1,y:-1}).unsigned()] as f32 + (2.) * L[(p+xy{x:1,y:0}).unsigned()] as f32 + (1.) * L[(p+xy{x:1,y:1}).unsigned()] as f32;
+                let Ly = (-1.) * L[(p+xy{x:-1,y:-1}).unsigned()] as f32 + (-2.) * L[(p+xy{x:0,y:-1}).unsigned()] as f32 + (-1.) * L[(p+xy{x:1,y:-1}).unsigned()] as f32 +
+                            (1.) * L[(p+xy{x:-1,y:1}).unsigned()] as f32 + (2.) * L[(p+xy{x:0,y:1}).unsigned()] as f32 + (1.) * L[(p+xy{x:1,y:1}).unsigned()] as f32;
+                target[p.unsigned()] = f32::min(255., f32::sqrt(Lx*Lx+Ly*Ly)) as u8;
+            }}
+            std::fs::write(format!("../.cache/las/{orientation}.Δ"), &target.data).unwrap();
+        }
+        if false {
+            let Δ = Image::<Array<u8>>::new(size, map("Δ", &format!("{orientation}")).unwrap());
+            let size = Δ.size;
+            let mut target = Image::zero(size);
+            for y in 1..size.y-1 { for x in 1..size.x-1 {
+                let p = xy{x,y};
+                target[p] = if neighbours.iter().all(|dp| Δ[(p.signed()+dp).unsigned()] <= Δ[p]) { Δ[p] } else { 0 }; // FIXME: keep non max along edge
+            }}
+            std::fs::write(format!("../.cache/las/{orientation}.max"), &target.data).unwrap();
+        }
+        if false {
+            let max = Image::<Array<u8>>::new(size, map("max", &format!("{orientation}")).unwrap());
+            let size = max.size;
+            let mut target = Image::zero(size);
+            for y in 1..size.y-1 { for x in 1..size.x-1 {
+                let p = xy{x,y};
+                target[p] = if max[p] > 0xFF/2 && neighbours.iter().any(|dp| max[(p.signed()+dp).unsigned()] > 0xFF/2) { max[p] } else { 0 };
+            }}
+            std::fs::write(format!("../.cache/las/{orientation}.edge"), &target.data).unwrap();
+        }
+        Image::new(size, map("edge", &format!("{orientation}")).unwrap())
+        //[b,g,r]
+    });
+
+    /*let mut X = Vec::with_capacity(las::Read::header(&reader).number_of_points() as usize);
+    let mut Y = Vec::with_capacity(las::Read::header(&reader).number_of_points() as usize);
+    let mut Z = Vec::with_capacity(las::Read::header(&reader).number_of_points() as usize);
+    for point in las::Read::points(&mut reader) {
+        let las::Point{x: E,y: N, z, ..} = point.unwrap();
+        let x = (E as f32-center.x)/extent;
+        let y = (N as f32-center.y)/extent;
+        let z = (z as f32-center.z)/extent;
+        if x > -1./2. && x < 1./2. && y > -1./2. && y < 1./2. {
+            X.push(x);
+            Y.push(y);
+            Z.push(z);
+        }
+    }
+    #[throws] fn write<T:bytemuck::Pod>(name: &str, field: &str, points: &[T]) { std::fs::write(format!("../.cache/las/{name}.{field}"), bytemuck::cast_slice(points))? }
+    write(points, "x", &X)?;
+    write(points, "y", &Y)?;
+    write(points, "z", &Z)?;*/
+
+    let map = |field| map(field, points).unwrap();
+    Ok(Self{
+        oblique,
+    	//ground,
+        ortho: [b,g,r],
+        buildings,
+        x: map("x"), y: map("y"), z: map("z"),
+        start_position: 0., position: xy{x:0.,y:f32::MAX}, vertical_scroll: 1.
+    })
+}
+}
+
+
+use vector::{xyz, vec3, cross, norm, minmax, MinMax};
+//use vector::{dot, normalize, num::IsZero};
 use ui::{Widget, RenderContext as Target, widget::{EventContext, Event}};
-
-//fn rotate(xy{x,y,..}: vec2, angle: f32) -> vec2 { xy{x: f32::cos(angle)*x+f32::sin(angle)*y, y: f32::cos(angle)*y-f32::sin(angle)*x} }
-
-fn sub(size: size, index: usize) -> (uint2, size) {
-    let size = size/xy{x: 3, y: 2};
-    (xy{x: index as u32%3, y:index as u32/3}*size, size)
-}
-fn sub_image<T, D:std::ops::DerefMut<Target=[T]>>(target: &mut Image<D>, index: usize) -> Image<&mut[T]> {
-    let (offset, size) = sub(target.size, index);
-    target.slice_mut(offset, size)
-}
-
-fn fit((offset, size): (uint2, size), source: size) -> (uint2, size) {
-    /*let fit = if size.x*source.y < size.y*source.x
-    { xy{x: size.x/source.x*source.x, y: size.x/source.x*source.y} } else
-    { xy{x: size.y/source.y*source.x, y: size.y/source.y*source.y} };*/
-    let fit = if size.x*source.y < size.y*source.x
-    { xy{x: size.x, y: size.x*source.y/source.x} } else
-    { xy{x: size.y*source.x/source.y, y: size.y} };
-    (offset+(size-fit)/2, fit)
-}
-fn fit_image<'m, T>(target: &'m mut Image<&mut[T]>, source: size) -> Image<&'m mut [T]> {
-    let (offset, size) = fit((num::zero(), target.size), source);
-    target.slice_mut(offset, size)
-}
-
-fn blit(target:&mut Image<&mut[bgra8]>, source: &Image<&[u8]>) {
-    let size = target.size;
-    for y in 0..size.y {
-        for x in 0..size.x {
-            let v = source[(y*source.size.y/size.y*source.stride+x*source.size.x/size.x) as usize];
-            let v = image::sRGB(&(v as f32/255.));
-            target[xy{x, y: size.y-1-y}] = bgra{b:v, g:v, r:v, a: 0xFF};
-        }
-    }
-}
-fn blit_sRGB(target:&mut Image<&mut[bgra8]>, [b,g,r]: &[Image<&[u8]>; 3]) {
-    let size = target.size;
-    for y in 0..size.y {
-        for x in 0..size.x {
-            let [b,g,r] = {
-                let xy{x,y} = ((size/2*b.size).signed()+(xy{x,y}.signed()-size.signed()/2)*b.size.signed()/5).unsigned();
-                let i = (y/size.y*b.stride+x/size.x) as usize;
-                [b.data[i],g.data[i],r.data[i]]
-            };
-            target[xy{x, y: size.y-1-y}] = bgra{b, g, r, a: 0xFF};
-        }
-    }
-}
-
-fn affine_blit(target:&mut Image<&mut[bgra8]>, source: Image<&[u8]>, A: mat3) {
-    let size = target.size;
-    for y in 0..size.y {
-        for x in 0..size.x {
-            let v = {
-                let p = {let size=vec2::from(size); size/2.+(vec2::from(xy{x,y})-size/2.)/5.};
-                let p = apply(A, p).map(|&c| c as u32);
-                if p.x >= source.size.x || p.y >= source.size.y { continue; }
-                image::sRGB(&(source[p] as f32/255.))
-            };
-            target[xy{x, y: size.y-1-y}] = bgra{b: v, g: v, r: v, a: 0xFF};
-        }
-    }
-}
-
-fn affine_blit_sRGB(target:&mut Image<&mut[bgra8]>, [b,g,r]: &[Image<&[u8]>; 3], A: mat3) {
-    let size = target.size;
-    for y in 0..size.y {
-        for x in 0..size.x {
-            let [b,g,r] = {
-                let p = {let size=vec2::from(size); size/2.+(vec2::from(xy{x,y})-size/2.)/5.};
-                let xy{x,y} = apply(A, p).map(|&c| c as u32);
-                if x >= b.size.x || y >= b.size.y { continue; }
-                let i = (y*b.stride+x) as usize;
-                [b.data[i],g.data[i],r.data[i]]
-            };
-            target[xy{x, y: size.y-1-y}] = bgra{b, g, r, a: 0xFF};
-        }
-    }
-}
 
 impl Widget for View {
 #[throws] fn event(&mut self, size: size, _event_context: &EventContext, event: &Event) -> bool {
@@ -195,7 +290,7 @@ impl Widget for View {
                 let xy{x,y} = xy{x,y}*source/size;
                 println!("{index} {x} {y}");
             };
-            for (index, image) in self.oblique.iter().enumerate() { f(index, fit(sub(size, index), image[0].size), image[0].size); }
+            //for (index, image) in self.oblique.iter().enumerate() { f(index, fit(sub(size, index), image[0].size), image[0].size); }
             f(4, fit(sub(size, 4), self.ortho[0].size), self.ortho[0].size);
             false
         },
@@ -205,9 +300,36 @@ impl Widget for View {
 
 fn paint(&mut self, target: &mut Target, _size: size) -> Result {
     let start = std::time::Instant::now();
-    let oblique = self.oblique.each_ref().map(|image| sRGB_to_linear(&image.each_ref().map(|image| image.as_ref())));
-    println!("{:?}", std::time::Instant::now().duration_since(start));
-
+    for (_index, image) in self.oblique.iter().enumerate() {
+        let size = image.size;
+        let mut image = Image::new(size, Vec::from(&*image.data));
+        let mut edges = Vec::new();
+        while let Some(p) = image.data.iter().position(|&v| v > 0) {
+            let p = p as u32;
+            let p = xy{x:p%image.size.x, y:p/image.size.x};
+            let mut walk = |edge:&mut Vec<uint2>, mut p:uint2| {
+                'walk: loop {
+                    for dp in neighbours { // FIXME: first do proper thinning to guarantee only one edge (otherwise => top-left bias)
+                        let next = (p.signed()+dp).unsigned();
+                        if image[next] > 0 {
+                            edge.push(next);
+                            image[next] = 0;
+                            p = next;
+                            continue 'walk;
+                        }
+                    }
+                    break;
+                }
+            };
+            let mut edge = Vec::new();
+            walk(&mut edge, p);
+            edge.reverse();
+            walk(&mut edge, p);
+            if edge.len() > 1 { edges.push(edge); }
+        }
+        use itertools::Itertools;
+        println!("{}", edges.iter().format_with(" ",|e,f| f(&format_args!("{}", e.len()))));
+    }
     //for (index, image) in self.oblique.iter().enumerate() { blit(&mut fit_image(&mut sub_image(target, index), image[0].size), &image.each_ref().map(|image| image.as_ref())); }
     blit_sRGB(&mut fit_image(&mut sub_image(target, 4), self.ortho[0].size), &self.ortho.each_ref().map(|image| image.as_ref()));
 
@@ -215,12 +337,12 @@ fn paint(&mut self, target: &mut Target, _size: size) -> Result {
         let [x, y] : [u32;2] = (&*line.split(' ').map(|c| str::parse(c).unwrap()).collect::<Box<_>>()).try_into().unwrap();
         uint2{x,y}
     }).collect::<Box<_>>()).try_into().unwrap());
-    let points : [[uint2; 5]; 3] = points.map(|point| iter::eval(|image| { let xy{x,y} = point[image]; xy{x, y: if image<4 { &self.oblique[image] } else { &self.ortho }[0].size.y-1-y}}));
+    let points : [[uint2; 5]; 3] = points.map(|point| iter::eval(|image| { let xy{x,y} = point[image]; xy{x, y: if image<4 { &self.oblique[image] } else { &self.ortho[0] }.size.y-1-y}}));
 
     let (_, size) = fit(sub(target.size, 0), self.ortho[0].size);
     let X : [vec2; 3] = points.map(|p| p[4].map(|&c| c as f32)*vec2::from(size)/vec2::from(self.ortho[0].size));
 
-    for (index, image) in oblique.iter().enumerate() {
+    for (index, image) in self.oblique.iter().enumerate() {
         let Y : [uint2; 3] = points.map(|p| p[index]);
         let A = {
             let X = [
@@ -543,205 +665,9 @@ fn paint(&mut self, target: &mut Target, _size: size) -> Result {
         _mm512_mask_i32scatter_epi32(target.as_ptr() as *mut u8, _mm512_cmplt_epu32_mask(p.x.into(), Simd::splat(size.x).into()) & _mm512_cmplt_epu32_mask(p.y.into(), Simd::splat(size.y).into()), ((Simd::splat(size.y-1)-p.y) * Simd::splat(size.x) + p.x).into(), bgra.into(), 4);
     }});*/
 
+    println!("{:?}", std::time::Instant::now().duration_since(start));
     Ok(())
 }
 }
 
-#[throws] fn size(name: &str) -> size {
-    let tiff = unsafe{memmap::Mmap::map(&std::fs::File::open(format!("../data/{name}.tif"))?)?};
-    let mut tiff = tiff::decoder::Decoder::new(std::io::Cursor::new(&*tiff))?;
-    let (size_x, size_y) = tiff.dimensions()?;
-    size{x: size_x, y: size_y}
-}
-
-type Bounds = MinMax<vec3>;
-
-#[throws] fn raster_bounds(name: &str) -> Bounds {
-    let size = size(name)?;
-    let tiff = unsafe{memmap::Mmap::map(&std::fs::File::open(format!("../data/{name}.tif"))?)?};
-    let mut tiff = tiff::decoder::Decoder::new(std::io::Cursor::new(&*tiff))?;
-    let [_, _, _, E, N, _] = tiff.get_tag_f64_vec(tiff::tags::Tag::ModelTiepointTag)?[..] else { panic!() };
-    let [scale_E, scale_N, _] = tiff.get_tag_f64_vec(tiff::tags::Tag::ModelPixelScaleTag)?[..] else { panic!() };
-    let min = vec3{x: E as f32, y: (N-scale_N*size.y as f64) as f32, z: 0.};
-    let max = vec3{x: (E+scale_E*size.x as f64) as f32, y: N as f32, z: f32::MAX};
-    MinMax{min, max}
-}
-
-#[throws] fn points_bounds(name: &str) -> Bounds {
-    let reader = las::Reader::from_path(format!("../data/{name}.las"))?;
-    let las::Bounds{min, max} = las::Read::header(&reader).bounds();
-    MinMax{min: vec3{x: min.x as f32, y: min.y as f32, z: min.z as f32}, max: vec3{x: max.x as f32, y: max.y as f32, z: max.z as f32}}
-}
-
-impl View {
-fn new(image: &str, points: &str) -> Result<Self> {
-    let image_bounds = raster_bounds(image)?;
-    let MinMax{min, max} = image_bounds.clip(points_bounds(points)?);
-    //println!("{min:?} {max:?}");
-    let center = (1./2.)*(min+max);
-    let extent = max-min;
-    let extent = extent.x.min(extent.y);
-
-    fn map<T:bytemuck::Pod>(field: &str, name: &str) -> Result<Array<T>> { self::map(&format!("../.cache/las/{name}.{field}")) }
-
-	/*let ground = {
-		let name = "swissalti3d_2020_2684-1248_0.5_2056_5728";
-		let tiff = unsafe{memmap::Mmap::map(&std::fs::File::open(format!("../data/{name}.tif"))?)?};
-		let mut tiff = tiff::decoder::Decoder::new(std::io::Cursor::new(&*tiff))?;
-		let tiff::decoder::DecodingResult::F32(ground) = tiff.read_image()? else { panic!() };
-	    let size = size(name)?;
-        let stride = size.x;
-        let ground = { // Flip Y and normalizes height
-            let mut target = unsafe{Box::new_uninit_slice(ground.len()).assume_init()};
-            for y in 0..size.y {
-                for x in 0..size.x {
-                    target[(y*stride+x) as usize] = (ground[((size.y-1-y)*stride+x) as usize]-center.z)/extent;
-                }
-            }
-            target
-        };
-        std::fs::write(format!("../.cache/las/{points}.ground"), bytemuck::cast_slice(&ground))?;
-
-		let bounds = raster_bounds(name)?;
-        let scale = size.x as f32 / (bounds.max - bounds.min).x;
-        assert!(scale == 2., "{scale}");
-        let min = scale*(min-bounds.min);
-        assert_eq!(min.x, f32::trunc(min.x));
-        assert_eq!(min.y, f32::trunc(min.y));
-        let max = scale*(max-bounds.min);
-        let size = xy{x: max.x as u32 - min.x as u32, y: max.y as u32 - min.y as u32};
-        let ground = map("ground", points).unwrap();
-        Image::strided(size, ground.map(|data| &data[((min.y as u32)*stride+(min.x as u32)) as usize..][..(size.y*stride) as usize]), stride)
-    };*/
-
-    let [r,g,b] = {
-        let size = size(image)?;
-        let scale = size.x as f32 / (image_bounds.max - image_bounds.min).x;
-        assert!(scale == 20.);
-        let min = scale*(min-image_bounds.min);
-        assert_eq!(min.x, f32::trunc(min.x));
-        assert_eq!(min.y, f32::trunc(min.y));
-        let max = scale*(max-image_bounds.min);
-
-        /*let tiff = unsafe{memmap::Mmap::map(&std::fs::File::open(format!("../data/{image}.tif"))?)?};
-        let mut tiff = tiff::decoder::Decoder::new(std::io::Cursor::new(&*tiff))?.with_limits(tiff::decoder::Limits::unlimited());
-        let tiff::decoder::DecodingResult::U8(mut rgba) = tiff.read_image()? else { panic!() };
-        println!("OK");
-        for i in 0..rgba.len()/4 {
-            let i = i*4;
-            rgba[i+0] = rgba[i+2]; // B
-            rgba[i+1] = rgba[i+1]; // G
-            rgba[i+2] = rgba[i+0]; // R
-            rgba[i+3] = rgba[i+3]; // A
-        }
-        let bgra = rgba;*/
-
-        let stride = size.x;
-        let plane_stride = (size.y*stride) as usize;
-
-        /*let flip = {
-            let image = map("bil", image).unwrap();
-            let mut flip = unsafe{Box::new_uninit_slice(image.len()).assume_init()};
-            for i in 0..3 {
-                for y in 0..size.y {
-                    for x in 0..size.x {
-                        flip[i*plane_stride+(y*stride+x) as usize] = image[i*plane_stride+((size.y-1-y)*stride+x) as usize];
-                    }
-                }
-            }
-            flip
-        };
-        std::fs::write(format!("../.cache/las/{image}.rgb"), flip)?;*/
-
-        let size = xy{x: max.x as u32 - min.x as u32, y: max.y as u32 - min.y as u32};
-        iter::eval(|plane| {
-            let image = map("rgb", image).unwrap();
-            Image::strided(size, image.map(|data| &data[plane*plane_stride + ((min.y as u32)*stride+(min.x as u32)) as usize..][..(size.y*stride) as usize]), stride)
-        })
-    };
-
-    /*let buildings = dxf::Drawing::load_file("../data/SWISSBUILDINGS3D_2_0_CHLV95LN02_1091-23.dxf")?.entities();
-    std::fs::write("../.cache/las/1091-23.buildings", bincode::serialize(&buildings.collect::<Vec<_>>())?)?;*/
-    let buildings : Vec<dxf::entities::Entity> = bincode::deserialize(&std::fs::read("../.cache/las/1091-23.buildings")?)?;
-    let start = std::time::Instant::now();
-    let buildings = buildings.into_iter().filter_map(|mesh| if let dxf::entities::EntityType::Polyline(mesh) = mesh.specific {
-        let mut vertices_and_indices = mesh.__vertices_and_handles.iter().peekable();
-        let mut vertices = Vec::new();
-        while let Some((vertex,_)) = vertices_and_indices.next_if(|(v,_)|
-            [v.polyface_mesh_vertex_index1, v.polyface_mesh_vertex_index2, v.polyface_mesh_vertex_index3, v.polyface_mesh_vertex_index4] == [0,0,0,0]
-        ) {
-            let dxf::Point{x,y,z} = vertex.location;
-            let v = (vec3{x: x as f32,y: y as f32, z: z as f32}-center)/extent;
-            if !(v.x > -1./2. && v.x < 1./2. && v.y > -1./2. && v.y < 1./2.) { return None; }
-            vertices.push(v);
-        }
-        let triangles = vertices_and_indices.map(|(v,_)| {
-            let face = [v.polyface_mesh_vertex_index1, v.polyface_mesh_vertex_index2, v.polyface_mesh_vertex_index3, v.polyface_mesh_vertex_index4];
-            assert!(face[3] == 0);
-            let face : [i32; 3] = face[..3].try_into().unwrap();
-            let face : [u16; 3] = face.map(|i| (i-1).try_into().unwrap());
-            for i in face { assert!((i as usize) < vertices.len(), "{face:?} {}", vertices.len()); }
-            face
-        }).collect::<Box<_>>();
-        Some((vertices.into_boxed_slice(),triangles))
-    } else { None }).collect::<Box<_>>();
-    println!("{:?}", std::time::Instant::now().duration_since(start));
-    //println!("{} {}", buildings.iter().map(|(v,t)| v.len()*4+t.len()*3*2).sum::<usize>(), buildings.iter().map(|(_,t)| t.len()*3*4).sum::<usize>());
-
-    let oblique = iter::eval(|index| {
-        let orientation = index*90;
-        let decoder = png::Decoder::new(std::fs::File::open(format!("../data/47.38380,8.55692,{orientation}.png")).unwrap());
-        let mut reader = decoder.read_info().unwrap();
-        let size = xy{x:reader.info().width, y:reader.info().height};
-        let stride = size.x;
-        let plane_stride = (size.y*stride) as usize;
-        if false {
-            //println!("{orientation}");
-            let mut buffer = vec![0; reader.output_buffer_size()];
-            let info = reader.next_frame(&mut buffer).unwrap();
-            let image = &buffer[..info.buffer_size()];
-            let mut planar = unsafe{Box::new_uninit_slice(image.len()).assume_init()};
-            for i in 0..3 {
-                for y in 0..size.y {
-                    for x in 0..size.x {
-                        planar[i*plane_stride+(y*stride+x) as usize] = image[(y*stride+x) as usize * 3 + i];
-                    }
-                }
-            }
-            std::fs::write(format!("../.cache/las/{orientation}.rgb"), planar).unwrap();
-        }
-        let [r,g,b] = iter::eval(|plane| Image::new(size, map("rgb", &format!("{orientation}")).unwrap().map(|data:&[u8]| &data[plane*plane_stride..][..plane_stride])));
-        [b,g,r]
-    });
-
-    /*let mut X = Vec::with_capacity(las::Read::header(&reader).number_of_points() as usize);
-    let mut Y = Vec::with_capacity(las::Read::header(&reader).number_of_points() as usize);
-    let mut Z = Vec::with_capacity(las::Read::header(&reader).number_of_points() as usize);
-    for point in las::Read::points(&mut reader) {
-        let las::Point{x: E,y: N, z, ..} = point.unwrap();
-        let x = (E as f32-center.x)/extent;
-        let y = (N as f32-center.y)/extent;
-        let z = (z as f32-center.z)/extent;
-        if x > -1./2. && x < 1./2. && y > -1./2. && y < 1./2. {
-            X.push(x);
-            Y.push(y);
-            Z.push(z);
-        }
-    }
-    #[throws] fn write<T:bytemuck::Pod>(name: &str, field: &str, points: &[T]) { std::fs::write(format!("../.cache/las/{name}.{field}"), bytemuck::cast_slice(points))? }
-    write(points, "x", &X)?;
-    write(points, "y", &Y)?;
-    write(points, "z", &Z)?;*/
-
-    let map = |field| map(field, points).unwrap();
-    Ok(Self{
-        oblique,
-    	//ground,
-        ortho: [b,g,r],
-        buildings,
-        x: map("x"), y: map("y"), z: map("z"),
-        start_position: 0., position: xy{x:0.,y:f32::MAX}, vertical_scroll: 1.
-    })
-}
-}
 #[throws] fn main() { ui::run(Box::new(View::new("2408", "2684_1248")?))? }
