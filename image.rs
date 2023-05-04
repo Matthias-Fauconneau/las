@@ -59,8 +59,9 @@ pub fn blit_sRGB(target:&mut Image<&mut[bgra8]>, [b,g,r]: &[Image<&[u8]>; 3]) {
     let size = target.size;
     for y in 0..size.y { for x in 0..size.x {
         let [b,g,r] = {
-            let xy{x,y} = ((size/2*b.size).signed()+(xy{x,y}.signed()-size.signed()/2)*b.size.signed()/5).unsigned();
-            let i = (y/size.y*b.stride+x/size.x) as usize;
+            let xy{x,y} = xy{x,y}*b.size/size;
+            //let xy{x,y} = ((size/2*b.size).signed()+(xy{x,y}.signed()-size.signed()/2)*b.size.signed()/5).unsigned()/size;
+            let i = (y*b.stride+x) as usize;
             [b.data[i],g.data[i],r.data[i]]
         };
         target[xy{x, y: size.y-1-y}] = bgra{b, g, r, a: 0xFF};
@@ -71,12 +72,22 @@ pub fn affine_blit(target:&mut Image<&mut[bgra8]>, source: Image<&[u8]>, A: mat3
     let size = target.size;
     for y in 0..size.y { for x in 0..size.x {
         let v = {
-            let p = {let size=vec2::from(size); size/2.+(vec2::from(xy{x,y})-size/2.)/5.};
-            let p = apply(A, p).map(|&c| c as u32);
-            if p.x >= source.size.x || p.y >= source.size.y { continue; }
-            sRGB(&(source[p] as f32/255.))
+            let p = vec2::from(xy{x,y});
+            //let p = {let size=vec2::from(size); size/2.+(1./5.)*(p-size/2.)};
+            let p = vec2::from(source.size)/vec2::from(target.size)*p;
+            let p = apply(A, p);//.map(|&c| c as u32);
+            //if p.x >= source.size.x || p.y >= source.size.y { continue; }
+            if p.x < 0. || p.x >= source.size.x as f32 || p.y < 0. || p.y >= source.size.y as f32 { continue; }
+            let p = p.map(|&c| c as u32);
+            //sRGB(&(source[p] as f32/255.))
+            source[p] as u16
         };
-        target[xy{x, y: size.y-1-y}] = bgra{b: v, g: v, r: v, a: 0xFF};
+        let v = if v > 0 { 255 } else { 64 };
+        //let v = 128+v/2;
+        //target[xy{x, y: size.y-1-y}] = bgra{b: v, g: v, r: v, a: 0xFF};
+        let ref mut p = target[xy{x, y: size.y-1-y}];
+        let bgra{b,g,r,..} = *p;
+        *p = bgra{b:((v*b as u16)/255) as u8, g:((v*g as u16)/255) as u8, r:((v*r as u16)/255) as u8, a: 0xFF};
     }}
 }
 
@@ -86,7 +97,8 @@ pub fn affine_blit_sRGB(target:&mut Image<&mut[bgra8]>, [b,g,r]: &[Image<&[u8]>;
     let size = target.size;
     for y in 0..size.y { for x in 0..size.x {
         let [b,g,r] = {
-            let p = {let size=vec2::from(size); size/2.+(vec2::from(xy{x,y})-size/2.)/5.};
+            let p = vec2::from(xy{x,y});
+            let p = {let size=vec2::from(size); size/2.+(1./5.)*(p-size/2.)};
             let xy{x,y} = apply(A, p).map(|&c| c as u32);
             if x >= b.size.x || y >= b.size.y { continue; }
             let i = (y*b.stride+x) as usize;

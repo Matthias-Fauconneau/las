@@ -24,6 +24,9 @@ png = "*"
 ash-window={git='https://github.com/Matthias-Fauconneau/ash'}
 ash={git='https://github.com/Matthias-Fauconneau/ash'}
 
+[patch.'https://github.com/Matthias-Fauconneau/vector']
+vector={path='../Code/vector'}
+
 [profile.dev]
 opt-level = 3
 overflow-checks = false
